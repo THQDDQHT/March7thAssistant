@@ -25,7 +25,8 @@ ICON_TEMPLATES = (
 
 # 给模型看的标注图：最大尺寸和 JPEG 质量
 ANNOTATED_SIZE = (1280, 720)
-JPEG_QUALITY = 80
+# 50 时文字和编号仍清晰；Codex 每轮都会把历史里的截图整体重发，图太大会撞上 DeepSeek 48 MiB 的请求上限（413）
+JPEG_QUALITY = 50
 
 # 网格：16 列（A-P）× 9 行（1-9）
 GRID_COLS = 16
