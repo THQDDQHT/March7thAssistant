@@ -37,7 +37,9 @@ from module.llm_agent.search import DeepSeekSearch, SearchError, format_results,
 # ---------------------------------------------------------------- 常量 ----
 
 # 第二期的按键白名单（第一期接管仍然只用 guard.ALLOWED_KEYS）
-MCP_ALLOWED_KEYS = ("esc", "enter", "space", "f", "e", "q", "w", "a", "s", "d", "1", "2", "3", "4")
+# 战斗和活动要用到很多按键（Q/E 选技能、空格确认、1–4 终结技、V 自动、B 加速、活动专属的 U/R 等），
+# 所以放行全部单个字母和数字；危险操作仍由护栏拦（画面有危险词时只允许 esc），F1 之类的功能键和组合键不放行
+MCP_ALLOWED_KEYS = ("esc", "enter", "space") + tuple("abcdefghijklmnopqrstuvwxyz") + tuple("0123456789")
 HOLD_MAX = 5.0
 WAIT_MIN, WAIT_MAX = 1.0, 10.0
 SCROLL_MIN, SCROLL_MAX = 1, 10

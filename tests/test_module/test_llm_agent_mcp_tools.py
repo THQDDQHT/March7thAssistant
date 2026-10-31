@@ -383,7 +383,7 @@ class TestPressKey:
         assert f"按了 {key} 键" in out.text
         assert env.auto.calls[-1] == ("press_key", key, 0.2)
 
-    @pytest.mark.parametrize("key", ["x", "tab", "alt", "ctrl+w", "m", "5"])
+    @pytest.mark.parametrize("key", ["tab", "alt", "ctrl+w", "f1", "shift", "xy", "10"])
     def test_other_keys_refused(self, env, key):
         env.tools.observe()
         assert "key_not_allowed" in env.tools.press_key(key).text

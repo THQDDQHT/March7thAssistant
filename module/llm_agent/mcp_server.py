@@ -131,7 +131,7 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def click_grid(cell: Annotated[str, Field(description="列 A-P + 行 1-9，例如 H5")]):
         return await call(tools.click_grid, cell)
 
-    @tool("按键。白名单：esc enter space f e q w a s d 1 2 3 4；画面有危险词时只允许 esc。hold_seconds>0 为按住（最多 5 秒，只用于走几步的短距离移动）。执行后自动返回新画面。")
+    @tool("按键。允许 esc、enter、space 和任意单个字母或数字（不含 F1 等功能键和组合键）；画面有危险词时只允许 esc。hold_seconds>0 为按住（最多 5 秒，只用于走几步的短距离移动）。执行后自动返回新画面。")
     async def press_key(key: Annotated[str, Field(description="按键名")],
                         hold_seconds: Annotated[float, Field(description="按住秒数，0 表示轻按；最多 5")] = 0):
         return await call(tools.press_key, key, hold_seconds)
