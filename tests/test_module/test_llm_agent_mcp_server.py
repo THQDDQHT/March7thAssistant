@@ -17,7 +17,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 EXPECTED_TOOLS = sorted("""observe click click_grid press_key scroll drag wait list_screens goto_screen list_m7a_tasks
-    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user""".split())
+    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user list_characters get_m7a_config set_m7a_config""".split())
 
 
 class FakeTools:
@@ -135,12 +135,19 @@ class TestRegistration:
             await mcp.call_tool("leave_for_user", {"item": "活动", "reason": "难"})
             await mcp.call_tool("web_search", {"query": "攻略"})
             await mcp.call_tool("resolve_todo", {"item": "活动"})
+            await mcp.call_tool("get_m7a_config", {"keys": ["forgottenhall_level"]})
+            await mcp.call_tool("get_m7a_config", {})
+            await mcp.call_tool("set_m7a_config", {"key": "forgottenhall_level", "value": [1, 12]})
+            await mcp.call_tool("set_m7a_config", {"key": "forgottenhall_enable", "value": True})
+            await mcp.call_tool("list_characters", {})
 
         asyncio.run(run())
         assert tools.calls == [
             ("press_key", ("w", 2.0)), ("scroll", ("up", 2, None, "H5")), ("drag", ("A1", "B2")),
             ("leave_for_user", ("活动", "难", "")), ("web_search", ("攻略", 8)),
-            ("resolve_todo", ("活动", ""))]
+            ("resolve_todo", ("活动", "")), ("get_m7a_config", (["forgottenhall_level"],)), ("get_m7a_config", ([],)),
+            ("set_m7a_config", ("forgottenhall_level", [1, 12])), ("set_m7a_config", ("forgottenhall_enable", True)),
+            ("list_characters", ())]
 
     def test_text_only_tool(self):
         mcp = ms.create_mcp(FakeTools())

@@ -2,7 +2,8 @@
 
 把 M7A 的能力包装成一组工具：看画面（observe）、点按钮（click / click_grid / press_key / scroll / drag / wait）、
 跳转界面（list_screens / goto_screen）、运行 M7A 任务（list_m7a_tasks / run_m7a_task / stop_m7a_task / get_status）、
-联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）。
+联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）、
+读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）。
 
 - 「最近一次观察」状态：元素编号和格子坐标都针对最近一次观察的结果。
 - 动作类工具执行后自动等画面稳定，再观察一次，把新画面一起返回。
@@ -26,6 +27,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from module.llm_agent import config as llm_config
+from module.llm_agent import mcp_config
 from module.llm_agent.actions import Action, ActionExecutor, ActionResult, normalize_action
 from module.llm_agent.errors import reraise_passthrough
 from module.llm_agent.guard import ALLOW, Guard, Verdict
@@ -79,6 +81,7 @@ RULE_DANGER_DRAG = "danger_drag"
 RULE_TASK_DENIED = "task_denied"
 RULE_OFFLINE = "offline_mode"
 RULE_BUSY = "busy"
+RULE_CONFIG = "config_rejected"
 
 TODO_FILE = "todo_for_user.md"
 TODO_ITEM_MAX = 100
@@ -459,6 +462,8 @@ class McpTools:
                  search: Optional[DeepSeekSearch] = None, runs=None, config_get: Optional[Callable] = None,
                  popen: Callable = subprocess.Popen, run: Callable = subprocess.run,
                  notify: Optional[Callable] = None, notify_runner: Optional[Callable] = None,
+                 config_service: Optional[mcp_config.ConfigService] = None,
+                 character_ids: Optional[Callable] = None, character_names: Optional[Callable] = None,
                  screens_path: str = SCREENS_PATH, sleep: Callable = time.sleep, clock: Callable = time.monotonic,
                  settle_seconds: float = SETTLE_SECONDS, task_poll_seconds: float = 2.0):
         self.offline = offline_image is not None
@@ -478,6 +483,9 @@ class McpTools:
         self._config_get = config_get
         self._notify = notify
         self._notify_runner = notify_runner
+        self._config_service = config_service
+        self._character_ids = character_ids or mcp_config.list_character_ids
+        self._character_names = character_names or mcp_config.load_character_names
 
         if self.offline:
             self._offline_auto = auto if auto is not None else OfflineAuto()
@@ -749,7 +757,7 @@ class McpTools:
         reason = reason.replace("show_grid", "observe(grid=true)")  # 第一期护栏的措辞是接管用的动作名
         verdict = Verdict(False, rule, reason)
         self._write_record(tool, args, started, verdict=verdict, before=before, before_screen=before_screen)
-        if rule in (RULE_INVALID_ARGUMENT, RULE_NO_OBSERVATION, RULE_BUSY, RULE_OFFLINE):
+        if rule in (RULE_INVALID_ARGUMENT, RULE_NO_OBSERVATION, RULE_BUSY, RULE_OFFLINE, RULE_CONFIG):
             return ToolOutput(f"【未执行】{reason}")
         if rule == RULE_TASK_RUNNING:
             return ToolOutput(f"【被拒绝】{reason}。M7A 任务运行期间不能做操作；可以用 get_status 查看进度，"
@@ -1337,6 +1345,51 @@ class McpTools:
             reason = f"没有名称匹配「{item}」的未处理事项。"
         listing = f"当前未处理 {count} 条：\n{text}" if count else "当前没有未处理的事项。"
         return ToolOutput(f"【未执行】{reason}{listing}")
+
+    # ------------------------------------------------------------ 配置 ----
+
+    @property
+    def config_service(self) -> mcp_config.ConfigService:
+        if self._config_service is None:
+            with self._deps_lock:
+                if self._config_service is None:
+                    if self.offline:
+                        # 离线模式：写到临时副本，不碰真实的 config.yaml
+                        config, _ = mcp_config.make_config_copy(self.root, os.path.join(self.recorder.base_dir, "config_copy"))
+                        provider = mcp_config.M7aConfig(config, force_writable=True)
+                    else:
+                        from module.config import cfg
+                        provider = mcp_config.M7aConfig(cfg)
+                    self._config_service = mcp_config.ConfigService(lambda: provider, self._character_ids)
+        return self._config_service
+
+    def list_characters(self) -> ToolOutput:
+        return ToolOutput(mcp_config.format_characters(self._character_ids(), self._character_names()))
+
+    def get_m7a_config(self, keys=None) -> ToolOutput:
+        args = {"keys": keys}
+        try:
+            return ToolOutput(self.config_service.get(keys))
+        except mcp_config.ConfigError as e:
+            return self._refuse("get_m7a_config", args, self._clock(), RULE_CONFIG, str(e))
+        except Exception as e:
+            reraise_passthrough(e)
+            return ToolOutput(f"读取配置失败：{self._safe(e)}")
+
+    def set_m7a_config(self, key, value) -> ToolOutput:
+        args = {"key": key, "value": value}
+        started = self._clock()
+        if not isinstance(key, str):
+            return self._invalid("set_m7a_config", args, "key 必须是配置键名。")
+        try:
+            text, info = self.config_service.set(key.strip(), value, self._active_task())
+        except mcp_config.ConfigError as e:
+            return self._refuse("set_m7a_config", args, started, RULE_CONFIG, str(e))
+        except Exception as e:
+            reraise_passthrough(e)
+            return ToolOutput(f"写入配置失败：{self._safe(e)}")
+        self._write_record("set_m7a_config", args, started, extra=info)
+        return ToolOutput(text + ("（离线模式：写的是临时副本，真实 config.yaml 没有改动）" if self.offline else ""))
 
     def list_todo_for_user(self) -> ToolOutput:
         count, text = self.todo.pending_text()

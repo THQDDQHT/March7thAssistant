@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 from logging.handlers import RotatingFileHandler
-from typing import Annotated, Callable, Optional
+from typing import Annotated, Any, Callable, Optional, Union
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -199,6 +199,26 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def resolve_todo(item: Annotated[str, Field(description="事项名称（leave_for_user 时写的 item）")],
                            note: Annotated[str, Field(description="处理说明，例如怎么完成的")] = ""):
         return await call(tools.resolve_todo, item, note)
+
+    @tool("列出队伍配置里能用的全部角色 ID（英文，区分大小写）和中文名。")
+    async def list_characters():
+        return await call(tools.list_characters)
+
+    @tool("读取 M7A 配置（只能读白名单内的键：混沌回忆 forgottenhall_*、虚构叙事 purefiction_*、末日幻影 apocalyptic_* 的 "
+          "enable/level/team*，以及体力计划 power_enable、power_plan、power_plan_keep、instance_type、instance_names、"
+          "instance_names_challenge_count）。keys 为空列表表示读全部白名单键；白名单外的键会被拒绝。")
+    async def get_m7a_config(keys: Annotated[Union[list[str], str], Field(description="配置键名列表，例如 [\"forgottenhall_team1\"]")] = []):
+        return await call(tools.get_m7a_config, keys)
+
+    @tool("修改 M7A 配置（只能改白名单内的键，写入前严格校验，返回「旧值 → 新值」）。"
+          "enable 类是 true/false；level 是 [最小, 最大]（混沌回忆 1–12，虚构叙事和末日幻影 1–4）；"
+          "team 是 1–4 个 [角色ID, 秘技次数]（角色 ID 见 list_characters，秘技次数 -1 到 2，-1 表示最后一个放秘技和普攻的，每队最多一个）；"
+          "power_plan 是 [[副本类型, 副本名称, 次数], ...]；instance_type 是副本类型；"
+          "instance_names / instance_names_challenge_count 是 {副本类型: 值}，可只给要改的类型。"
+          "有任务在跑时也能写，但下次运行任务时才生效。")
+    async def set_m7a_config(key: Annotated[str, Field(description="配置键名，例如 forgottenhall_team1")],
+                             value: Annotated[Any, Field(description="新值（JSON 值，类型见工具说明）")]):
+        return await call(tools.set_m7a_config, key, value)
 
     @tool("读出留给用户、还没处理的事项清单。")
     async def list_todo_for_user():
