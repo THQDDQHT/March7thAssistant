@@ -21,7 +21,7 @@ def _click(element_id):
 class TestDangerWordsConstant:
     def test_table_contents(self):
         expected = ["购买", "支付", "充值", "跃迁", "星琼", "古老梦华", "专票", "通票",
-                    "兑换", "分解", "弃置", "出售", "删除", "确认支付"]
+                    "余烬", "星芒", "分解", "弃置", "出售", "删除", "确认支付"]
         assert list(gd.DANGER_WORDS) == expected
 
     def test_extra_words_appended(self):
@@ -76,6 +76,16 @@ class TestRule3ConfirmWithDangerOnScreen:
 
     def test_consume_is_not_a_danger_word(self):
         assert "消耗" not in gd.DANGER_WORDS
+
+    def test_event_token_exchange_allowed(self):
+        # 活动代币兑换允许做：「兑换」不是危险词
+        assert "兑换" not in gd.DANGER_WORDS
+        assert gd.Guard().check(_click(1), _obs(["确认", "是否消耗 30 枚活动代币兑换"])).allowed
+
+    @pytest.mark.parametrize("currency", ["未熄的余烬", "未熄的星芒", "星琼", "古老梦华"])
+    def test_exchange_with_gacha_or_premium_currency_blocked(self, currency):
+        verdict = gd.Guard().check(_click(1), _obs(["确认", f"是否消耗 20 {currency}兑换"]))
+        assert not verdict.allowed and verdict.rule == gd.RULE_DANGER_CONFIRM
 
     def test_confirm_allowed_without_danger(self):
         assert gd.Guard().check(_click(1), _obs(["确认", "网络连接已断开"])).allowed

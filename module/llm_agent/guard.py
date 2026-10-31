@@ -15,9 +15,10 @@ from typing import Iterable, Optional, Sequence
 
 from module.llm_agent.actions import Action
 
+# 「兑换」不在表里：活动代币兑换允许做；用付费或抽卡产出的货币兑换，靠货币名拦（星琼、古老梦华、余烬、星芒等）
 DANGER_WORDS = (
     "购买", "支付", "充值", "跃迁", "星琼", "古老梦华", "专票", "通票",
-    "兑换", "分解", "弃置", "出售", "删除", "确认支付",
+    "余烬", "星芒", "分解", "弃置", "出售", "删除", "确认支付",
 )
 CONFIRM_TEXTS = ("确认", "确定", "是", "同意")
 ALLOWED_KEYS = ("esc", "enter", "space", "f")

@@ -317,7 +317,7 @@ class TestClick:
         assert record["verdict"]["allowed"] is False and record["verdict"]["rule"] == "danger_target"
 
     def test_confirm_button_blocked_when_screen_has_danger_word(self, tmp_path):
-        env = Env(tmp_path, texts=("确认", "兑换商品"))
+        env = Env(tmp_path, texts=("确认", "购买商品"))
         env.tools.observe()
         out = env.tools.click(1)
         assert "danger_confirm" in out.text
