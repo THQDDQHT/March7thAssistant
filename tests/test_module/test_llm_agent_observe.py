@@ -227,6 +227,43 @@ class TestActionCoordinates:
         # H5 = (840,480)-(960,600)，中心 (900,540)，加上窗口偏移
         assert auto.clicks == [(910, 560)]
 
+    def test_click_prefers_observation_pos_and_scale_over_auto(self):
+        # auto 当前的 pos/scale 已经变了（观察后又截过图），点击仍按这次观察记下的值换算
+        auto = _FakeAuto(scale=2.0, pos=(999, 999, 3840, 2160))
+        element = ob.Element(1, "关闭", (200, 100, 300, 140))
+        observation = self._observation([element])
+        observation.screenshot_pos = (100, 50, 2400, 1350)
+        observation.scale = 1.25
+        ActionExecutor(auto=auto).execute(Action("click", {"id": 1}), observation)
+        assert auto.clicks == [(300, 146)]  # 与 auto 用同样参数换算的结果一致
+
+    def test_observation_conversion_matches_auto_formula(self):
+        auto_same = _FakeAuto(scale=1.5, pos=(30, 40, 2880, 1620))
+        element = ob.Element(1, "x", (101, 203, 407, 251))
+        direct = ActionExecutor(auto=auto_same)
+        direct.execute(Action("click", {"id": 1}), self._observation([element]))  # 退回 auto
+        auto_other = _FakeAuto(scale=9.0, pos=(0, 0, 1, 1))
+        observation = self._observation([element])
+        observation.screenshot_pos, observation.scale = (30, 40, 2880, 1620), 1.5
+        ActionExecutor(auto=auto_other).execute(Action("click", {"id": 1}), observation)
+        assert auto_other.clicks == auto_same.clicks
+
+    def test_grid_click_uses_observation_pos_and_scale(self):
+        auto = _FakeAuto(scale=2.0, pos=(999, 999, 3840, 2160))
+        observation = self._observation([], (1920, 1080))
+        observation.screenshot_pos, observation.scale = (10, 20, 1920, 1080), 1.0
+        ActionExecutor(auto=auto).execute(Action("click_grid", {"cell": "H5"}), observation)
+        assert auto.clicks == [(910, 560)]
+
+    def test_falls_back_to_auto_when_pos_or_scale_missing(self):
+        element = ob.Element(1, "x", (100, 200, 300, 240))
+        for pos, scale in [(None, None), ((0, 0, 1, 1), None), (None, 1.0)]:
+            auto = _FakeAuto(scale=1.0, pos=(5, 6, 1920, 1080))
+            observation = self._observation([element], (1920, 1080))
+            observation.screenshot_pos, observation.scale = pos, scale
+            ActionExecutor(auto=auto).execute(Action("click", {"id": 1}), observation)
+            assert auto.clicks == [(205, 226)]
+
     def test_press_key_and_wait(self):
         auto = _FakeAuto(1.0, (0, 0, 1920, 1080))
         slept = []

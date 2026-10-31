@@ -6,7 +6,7 @@
 3. 目标是确认类按钮（文字为 确认/确定/是/同意，或者是确认图标），同时画面上任意文字包含危险词 → 拒绝。
 4. 画面上任意文字包含危险词时，禁止 click_grid（网格点击看不到目标是什么，所以从严处理）；
    另外 click_grid 只能在网格模式下用。
-5. 按键只允许白名单里的几个。
+5. 按键只允许白名单里的几个；画面上有危险词时，只允许按 esc（enter / space / f 可能等于点了确认）。
 上限（步数、时长、次数）和暂停响应在接管循环里（takeover.py）。
 被拒绝的动作会反馈给模型，同时计入步数。
 """
@@ -21,6 +21,8 @@ DANGER_WORDS = (
 )
 CONFIRM_TEXTS = ("确认", "确定", "是", "同意")
 ALLOWED_KEYS = ("esc", "enter", "space", "f")
+# 画面上有危险词时唯一允许的按键
+SAFE_KEY_ON_DANGER = "esc"
 
 # 规则编号（写进记录，方便复盘）
 RULE_INVALID_ACTION = "invalid_action"
@@ -30,6 +32,7 @@ RULE_DANGER_CONFIRM = "danger_confirm"  # 规则 3
 RULE_DANGER_GRID = "danger_grid"  # 规则 4
 RULE_GRID_INACTIVE = "grid_inactive"
 RULE_KEY_NOT_ALLOWED = "key_not_allowed"  # 规则 5
+RULE_DANGER_KEY = "danger_key"  # 规则 5：画面上有危险词时只允许 esc
 
 _STRIP_CHARS = " \t\r\n。.!！?？:：、,，()（）[]【】"
 
@@ -66,12 +69,16 @@ class Guard:
         return None
 
     def screen_danger_word(self, texts: Sequence[str]) -> Optional[str]:
-        """画面上任意文字包含危险词时，返回命中的危险词。"""
+        """画面上任意文字包含危险词时，返回命中的危险词。
+
+        先逐条检查，再把所有元素文字拼接起来检查一次：OCR 可能把一个词拆进相邻的两个框
+        （例如「购」和「买」），只逐条检查会漏掉。拼接检查宁可误拦也不漏拦。
+        """
         for text in texts:
             word = self.find_danger_word(text)
             if word:
                 return word
-        return None
+        return self.find_danger_word("".join(texts))
 
     @staticmethod
     def is_confirm_element(element) -> bool:
@@ -90,6 +97,10 @@ class Guard:
             key = str(action.params.get("key", "")).strip().lower()
             if key not in ALLOWED_KEYS:
                 return Verdict(False, RULE_KEY_NOT_ALLOWED, f"按键 {key!r} 不在白名单内，只允许 {', '.join(ALLOWED_KEYS)}")
+            if key != SAFE_KEY_ON_DANGER:
+                word = self.screen_danger_word(observation.all_texts())
+                if word:
+                    return Verdict(False, RULE_DANGER_KEY, f"画面上出现危险词「{word}」，只允许按 {SAFE_KEY_ON_DANGER}")
             return ALLOW
         if name in ("show_grid", "wait", "done", "give_up"):
             return ALLOW

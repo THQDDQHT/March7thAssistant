@@ -105,7 +105,7 @@ class ActionExecutor:
             element = observation.get(action.params["id"])
             if element is None:
                 return ActionResult(False, f"没有编号为 {action.params['id']} 的元素")
-            if not self._click_rect(element.box):
+            if not self._click_rect(element.box, observation):
                 return ActionResult(False, f"点击 [{element.id}] {element.text} 没有完成（窗口不可用或鼠标被占用）")
             return ActionResult(True, f"点击了 [{element.id}] {element.text}")
         if action.name == "click_grid":
@@ -113,7 +113,7 @@ class ActionExecutor:
             if rect is None:
                 return ActionResult(False, f"格子 {action.params['cell']} 不合法")
             left, top, right, bottom = rect
-            if not self._click_rect([[left, top], [right, top], [right, bottom], [left, bottom]]):
+            if not self._click_rect([[left, top], [right, top], [right, bottom], [left, bottom]], observation):
                 return ActionResult(False, f"点击格子 {action.params['cell']} 没有完成（窗口不可用或鼠标被占用）")
             return ActionResult(True, f"点击了格子 {action.params['cell']}")
         if action.name == "press_key":
@@ -125,11 +125,19 @@ class ActionExecutor:
             return ActionResult(True, f"等待了 {action.params['seconds']:g} 秒")
         return ActionResult(True, "")
 
-    def _click_rect(self, box) -> bool:
-        """截图坐标的框 → 屏幕绝对坐标（先除以 scale，再加 screenshot_pos）→ 点击中心。
+    def _click_rect(self, box, observation=None) -> bool:
+        """截图坐标的框 → 屏幕绝对坐标 → 点击中心。
 
+        优先用这次观察时记下的 screenshot_pos / scale 换算（公式同 auto.calculate_text_position：
+        先除以 scale，再加 pos），不依赖「观察之后 auto 没有再截过图」；两者缺失（离线观察）时退回 auto 当前的值。
         点击走 auto 的输入层，所以上游的后台输入模式自动生效；返回 False 表示点击没有完成
         （后台输入遇到窗口不可用、鼠标被占用等可恢复情况）。InputInterrupted / GameWindowLost 会原样抛出。
         """
-        absolute = self.auto.calculate_text_position(box, relative=False)
+        pos = getattr(observation, "screenshot_pos", None)
+        scale = getattr(observation, "scale", None)
+        if pos is not None and scale:
+            absolute = ((int(box[0][0] / scale) + pos[0], int(box[0][1] / scale) + pos[1]),
+                        (int(box[2][0] / scale) + pos[0], int(box[2][1] / scale) + pos[1]))
+        else:
+            absolute = self.auto.calculate_text_position(box, relative=False)
         return self.auto.click_element_with_pos(absolute) is not False

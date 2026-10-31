@@ -150,3 +150,57 @@ class TestNormalizeAction:
     def test_describe(self):
         assert Action("click", {"id": 3}).describe() == "click(id=3)"
         assert Action("show_grid").describe() == "show_grid"
+
+
+class TestDangerKeyRule:
+    """画面上有危险词时，enter/space/f 可能等于点了确认，只允许按 esc。"""
+
+    @pytest.mark.parametrize("key", ["enter", "space", "f"])
+    def test_other_keys_blocked_when_danger_on_screen(self, key):
+        verdict = gd.Guard().check(Action("press_key", {"key": key}), _obs(["购买", "确认"]))
+        assert not verdict.allowed
+        assert verdict.rule == gd.RULE_DANGER_KEY
+
+    def test_esc_still_allowed_when_danger_on_screen(self):
+        assert gd.Guard().check(Action("press_key", {"key": "esc"}), _obs(["购买", "确认"])).allowed
+
+    @pytest.mark.parametrize("key", ["enter", "space", "f", "esc"])
+    def test_all_whitelisted_keys_allowed_without_danger(self, key):
+        assert gd.Guard().check(Action("press_key", {"key": key}), _obs(["关闭"])).allowed
+
+    def test_non_whitelisted_key_keeps_original_rule(self):
+        verdict = gd.Guard().check(Action("press_key", {"key": "tab"}), _obs(["购买"]))
+        assert verdict.rule == gd.RULE_KEY_NOT_ALLOWED
+
+    def test_split_danger_word_also_blocks_key(self):
+        assert gd.Guard().check(Action("press_key", {"key": "enter"}), _obs(["购", "买"])).rule == gd.RULE_DANGER_KEY
+
+    def test_extra_danger_words_apply(self):
+        assert not gd.Guard(["礼包"]).check(Action("press_key", {"key": "enter"}), _obs(["礼包"])).allowed
+
+
+class TestDangerWordSplitAcrossBoxes:
+    """OCR 把一个危险词拆进相邻两个框时，画面级检查（规则 3、4、按键）也要拦住。"""
+
+    def test_screen_danger_word_on_joined_text(self):
+        guard = gd.Guard()
+        assert guard.screen_danger_word(["购", "买"]) == "购买"
+        assert guard.screen_danger_word(["确认", "支", "付"]) == "支付"
+        assert guard.screen_danger_word(["关闭", "返回"]) is None
+
+    def test_rule3_confirm_blocked_when_word_split(self):
+        verdict = gd.Guard().check(_click(1), _obs(["确认", "购", "买"]))
+        assert not verdict.allowed
+        assert verdict.rule == gd.RULE_DANGER_CONFIRM
+
+    def test_rule4_grid_blocked_when_word_split(self):
+        verdict = gd.Guard().check(Action("click_grid", {"cell": "H5"}), _obs(["跃", "迁"], grid=True))
+        assert not verdict.allowed
+        assert verdict.rule == gd.RULE_DANGER_GRID
+
+    def test_split_extra_word(self):
+        assert not gd.Guard(["礼包"]).check(Action("click_grid", {"cell": "H5"}), _obs(["礼", "包"], grid=True)).allowed
+
+    def test_rule2_target_alone_not_affected(self):
+        # 规则 2 只看目标自己：目标「关闭」旁边的「购」「买」不会拦住点击关闭
+        assert gd.Guard().check(_click(1), _obs(["关闭", "购", "买"])).allowed

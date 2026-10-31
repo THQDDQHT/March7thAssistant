@@ -94,6 +94,15 @@ class TestMessages:
             assert action in prompt
         assert "esc" in prompt and "购买" in prompt
 
+    def test_system_prompt_describes_key_screens(self):
+        prompt = cl.build_system_prompt(["主界面", "手机菜单"])
+        assert "主界面：就是大世界的探索画面" in prompt
+        for part in ("小地图", "任务追踪", "队伍头像", "疾跑"):
+            assert part in prompt
+        assert "手机菜单：在主界面按 esc 打开" in prompt
+        assert "直接输出 done" in prompt
+        assert len(prompt) < 1500  # 控制 token
+
     def test_step_message_has_image_table_step_and_history(self):
         message = cl.build_step_message(2, 12, "目标", "[1] 关闭 @ (50%, 50%)", ["第 1 步 click(id=3)：已执行"], b"\xff\xd8jpeg", False)
         assert message["role"] == "user"
