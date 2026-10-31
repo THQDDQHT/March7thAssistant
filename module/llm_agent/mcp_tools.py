@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from module.llm_agent import config as llm_config
-from module.llm_agent import mcp_config
+from module.llm_agent import mcp_config, scancode_input
 from module.llm_agent.actions import Action, ActionExecutor, ActionResult, normalize_action
 from module.llm_agent.errors import reraise_passthrough
 from module.llm_agent.guard import ALLOW, Guard, Verdict
@@ -306,7 +306,11 @@ class McpExecutor(ActionExecutor):
         return int(top_left[0]), int(top_left[1])
 
     def press(self, key: str, hold: float) -> ActionResult:
-        done = self.auto.press_key(key, hold) if hold > 0 else self.auto.press_key(key)
+        if scancode_input.use_for(self.auto):
+            # 前台输入模式：pyautogui 的扫描码是 0，战斗快捷键收不到，改用硬件扫描码（后台、云游戏、离线不走这里）
+            done = scancode_input.press(key, hold if hold > 0 else scancode_input.DEFAULT_HOLD)
+        else:
+            done = self.auto.press_key(key, hold) if hold > 0 else self.auto.press_key(key)
         if done is False:
             return ActionResult(False, f"按 {key} 键没有完成（窗口不可用）")
         return ActionResult(True, f"按了 {key} 键" + (f"，按住 {hold:g} 秒" if hold > 0 else ""))

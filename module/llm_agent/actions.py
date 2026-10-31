@@ -8,6 +8,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, Tuple
 
+from module.llm_agent import scancode_input
 from module.llm_agent.observe import GRID_CELL_RE, cell_rect
 
 ACTION_NAMES = ("click", "show_grid", "click_grid", "press_key", "wait", "done", "give_up")
@@ -117,7 +118,14 @@ class ActionExecutor:
                 return ActionResult(False, f"点击格子 {action.params['cell']} 没有完成（窗口不可用或鼠标被占用）")
             return ActionResult(True, f"点击了格子 {action.params['cell']}")
         if action.name == "press_key":
-            if self.auto.press_key(action.params["key"]) is False:
+            if scancode_input.use_for(self.auto):
+                # 前台输入：pyautogui 的扫描码是 0，战斗快捷键收不到，改用硬件扫描码发键（后台输入、云游戏不走这里）
+                from utils.pause import pause_ctl
+                pause_ctl.checkpoint()
+                done = scancode_input.press(action.params["key"])
+            else:
+                done = self.auto.press_key(action.params["key"])
+            if done is False:
                 return ActionResult(False, f"按 {action.params['key']} 键没有完成（窗口不可用）")
             return ActionResult(True, f"按了 {action.params['key']} 键")
         if action.name == "wait":
