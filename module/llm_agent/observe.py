@@ -15,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 # OCR 置信度低于该值的文字当作噪声丢弃
-OCR_MIN_CONF = 0.5
+OCR_MIN_CONF = 0.6
 
 # 模板匹配的图标：(模板路径, 元素文字, 种类, 匹配阈值)
 ICON_TEMPLATES = (
