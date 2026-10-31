@@ -157,6 +157,32 @@ class TestLoop:
         assert result.success and result.steps == 0
         assert client.calls == []
 
+    def test_specific_goal_not_satisfied_by_other_known_screen(self, tmp_path):
+        # 切换超时的真实情况：画面是「活动」（已知界面），但要去的是「手机菜单」，不能 0 步直接判定成功
+        takeover, client, screen, executor = _build(
+            tmp_path, [{"action": "press_key", "key": "esc"}, {"action": "give_up", "reason": "过不去"}],
+            screen_script=[True, True])
+        screen.screen_id = "activity"
+        result = takeover.run("wait_for_screen_change", "menu")
+        assert not result.success
+        assert len(client.calls) == 2
+        assert executor.executed == [{"action": "press_key", "key": "esc"}]
+        assert "回到界面「menu」" in _user_text(client.calls[0])
+
+    def test_specific_goal_reached_is_success(self, tmp_path):
+        takeover, client, screen, executor = _build(
+            tmp_path, [{"action": "press_key", "key": "esc"}], screen_script=[True, True])
+        screen.screen_id = "activity"
+        execute = executor.execute
+
+        def execute_and_arrive(action, observation):
+            screen.screen_id = "menu"
+            return execute(action, observation)
+
+        executor.execute = execute_and_arrive
+        result = takeover.run("wait_for_screen_change", "menu")
+        assert result.success and result.steps == 1
+
     def test_done_without_recognition_is_failed_step_and_loop_continues(self, tmp_path):
         takeover, client, screen, executor = _build(
             tmp_path,

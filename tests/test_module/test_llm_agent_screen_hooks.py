@@ -219,7 +219,8 @@ class TestWaitForScreenChangeHook:
         monkeypatch.setattr(tk, "try_takeover", lambda trigger, goal=tk.ANY_KNOWN, **kw: calls.append((trigger, goal)) or True)
         screen.change_to = MagicMock()
         screen.wait_for_screen_change("main", max_recursion=0)
-        assert calls == [("wait_for_screen_change", tk.ANY_KNOWN)]
+        # 切换超时要以目标界面为接管目标：卡住时当前界面往往认得出来，用「任意已知界面」会直接判定成功
+        assert calls == [("wait_for_screen_change", "main")]
         screen.change_to.assert_called_once_with("main", max_recursion=0)
 
     def test_takeover_failure_raises_original_error(self, monkeypatch):
