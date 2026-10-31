@@ -24,6 +24,14 @@ def _stub(name, **members):
     return module
 
 
+class _InputInterrupted(RuntimeError):
+    pass
+
+
+class _GameWindowLost(RuntimeError):
+    pass
+
+
 class _FakeAuto:
     """永远认不出任何界面。"""
 
@@ -43,6 +51,9 @@ def _build_screen(monkeypatch):
     cfg.get_value.side_effect = lambda key, default=None: default
     stubs = {
         "module.automation": _stub("module.automation", auto=_FakeAuto()),
+        "module.automation.background_input": _stub(
+            "module.automation.background_input",
+            InputInterrupted=_InputInterrupted, GameWindowLost=_GameWindowLost),
         "module.config": _stub("module.config", cfg=cfg),
         "module.logger": _stub("module.logger", log=MagicMock()),
     }
@@ -136,6 +147,55 @@ class TestGetCurrentScreenHook:
         monkeypatch.setattr(tk, "try_takeover", boom)
         assert screen.get_current_screen(max_retries=4) is False
         assert screen.autotry_calls == 4
+
+
+PASSTHROUGH_ERRORS = [_InputInterrupted("游戏窗口已最小化"), _GameWindowLost("游戏进程已退出")]
+
+
+class TestPassthroughExceptions:
+    """上游后台输入的 InputInterrupted / GameWindowLost 必须原样向上抛，不能被钩子的 except Exception 吞掉。"""
+
+    @pytest.mark.parametrize("error", PASSTHROUGH_ERRORS, ids=lambda e: type(e).__name__)
+    def test_get_current_screen_hook_reraises(self, monkeypatch, error):
+        screen, _ = _build_screen(monkeypatch)
+
+        def boom(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(tk, "try_takeover", boom)
+        with pytest.raises(type(error)):
+            screen.get_current_screen(max_retries=5)
+        assert screen.autotry_calls == 2  # 在第 3 次失败的钩子里抛出，没有继续重试
+
+    @pytest.mark.parametrize("error", PASSTHROUGH_ERRORS, ids=lambda e: type(e).__name__)
+    def test_wait_for_screen_change_hook_reraises(self, monkeypatch, error):
+        screen, _ = _build_screen(monkeypatch)
+
+        def boom(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(tk, "try_takeover", boom)
+        screen.change_to = MagicMock()
+        with pytest.raises(type(error)):
+            screen.wait_for_screen_change("main", max_recursion=0)
+        screen.change_to.assert_not_called()
+
+    @pytest.mark.parametrize("error", PASSTHROUGH_ERRORS, ids=lambda e: type(e).__name__)
+    def test_error_from_retry_change_to_propagates_and_resets_flag(self, monkeypatch, error):
+        screen, _ = _build_screen(monkeypatch)
+        monkeypatch.setattr(tk, "try_takeover", lambda *a, **kw: True)
+        screen.change_to = MagicMock(side_effect=error)
+        with pytest.raises(type(error)):
+            screen.wait_for_screen_change("main", max_recursion=0)
+        assert screen._llm_retrying is False
+
+    def test_stop_request_not_swallowed(self, monkeypatch):
+        from utils.pause import RunStopRequested
+        screen, _ = _build_screen(monkeypatch)
+
+        def stop(*args, **kwargs):
+            raise RunStopRequested()
+        monkeypatch.setattr(tk, "try_takeover", stop)
+        with pytest.raises(RunStopRequested):
+            screen.get_current_screen(max_retries=5)
 
 
 class TestWaitForScreenChangeHook:

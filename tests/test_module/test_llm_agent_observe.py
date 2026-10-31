@@ -241,3 +241,44 @@ class TestActionCoordinates:
         result = ActionExecutor(auto=auto).execute(Action("click", {"id": 9}), self._observation([]))
         assert result.ok is False
         assert auto.clicks == []
+
+
+class TestExecutorBackgroundInput:
+    """上游后台输入：点击/按键返回 False 表示没有完成；InputInterrupted / GameWindowLost 原样抛出。"""
+
+    def _observation(self):
+        return ob.Observation(image=Image.new("RGB", (1920, 1080)), elements=[ob.Element(1, "关闭", (100, 100, 200, 140))])
+
+    def test_click_not_completed_reported(self):
+        auto = _FakeAuto(1.0, (0, 0, 1920, 1080))
+        auto.click_element_with_pos = lambda coordinates: False
+        result = ActionExecutor(auto=auto).execute(Action("click", {"id": 1}), self._observation())
+        assert result.ok is False and "没有完成" in result.message
+
+    def test_grid_click_not_completed_reported(self):
+        auto = _FakeAuto(1.0, (0, 0, 1920, 1080))
+        auto.click_element_with_pos = lambda coordinates: False
+        assert ActionExecutor(auto=auto).execute(Action("click_grid", {"cell": "A1"}), self._observation()).ok is False
+
+    def test_press_key_false_reported_but_none_is_fine(self):
+        auto = _FakeAuto(1.0, (0, 0, 1920, 1080))
+        auto.press_key = lambda key: False
+        assert ActionExecutor(auto=auto).execute(Action("press_key", {"key": "esc"}), self._observation()).ok is False
+        auto.press_key = lambda key: None  # 前台输入没有返回值
+        assert ActionExecutor(auto=auto).execute(Action("press_key", {"key": "esc"}), self._observation()).ok is True
+
+    @pytest.mark.parametrize("name", ["InputInterrupted", "GameWindowLost"])
+    def test_background_errors_propagate(self, name):
+        from module.automation import background_input
+        error = getattr(background_input, name)("后台输入出错")
+        auto = _FakeAuto(1.0, (0, 0, 1920, 1080))
+
+        def boom(*args, **kwargs):
+            raise error
+        auto.click_element_with_pos = boom
+        auto.press_key = boom
+        executor = ActionExecutor(auto=auto)
+        with pytest.raises(type(error)):
+            executor.execute(Action("click", {"id": 1}), self._observation())
+        with pytest.raises(type(error)):
+            executor.execute(Action("press_key", {"key": "esc"}), self._observation())

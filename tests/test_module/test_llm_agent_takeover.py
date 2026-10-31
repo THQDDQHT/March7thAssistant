@@ -2,6 +2,7 @@
 """大模型接管：接管循环、步数/时间/次数上限、防重入、没有 key 时降级、记录、key 不泄露、暂停响应。"""
 import json
 import os
+from unittest.mock import MagicMock
 
 import pytest
 from PIL import Image
@@ -431,3 +432,87 @@ class TestTryTakeover:
         monkeypatch.setenv(lc.ENV_API_KEY, KEY)
         takeover = tk._build_takeover(_config(base_url="https://x.test", model="m"), KEY)
         assert takeover.client.base_url == "https://x.test" and takeover.client.model == "m"
+
+
+class TestPassthroughExceptions:
+    """InputInterrupted / GameWindowLost（上游后台输入）和停止指令必须原样抛出，不能被接管吞掉。"""
+
+    @pytest.fixture(params=["InputInterrupted", "GameWindowLost"])
+    def error(self, request):
+        from module.automation import background_input
+        return getattr(background_input, request.param)("后台输入出错")
+
+    def test_helper(self, error):
+        from module.llm_agent.errors import passthrough_exceptions, reraise_passthrough
+        assert type(error) in passthrough_exceptions()
+        with pytest.raises(type(error)):
+            reraise_passthrough(error)
+        reraise_passthrough(RuntimeError("普通错误"))  # 普通异常不受影响
+        reraise_passthrough(LLMError("x"))
+
+    def test_error_in_screen_check_propagates(self, tmp_path, error):
+        takeover, client, screen, executor = _build(tmp_path, [{"action": "click", "id": 1}], screen_script=[False])
+        calls = {"n": 0}
+        real = screen.get_current_screen
+
+        def check(autotry=True, max_retries=10):
+            calls["n"] += 1
+            if calls["n"] == 2:  # 动作之后的检测
+                raise error
+            return real(autotry=autotry)
+        screen.get_current_screen = check
+        with pytest.raises(type(error)):
+            takeover.run("t")
+        assert executor.executed == [{"action": "click", "id": 1}]
+
+    def test_error_in_first_screen_check_propagates(self, tmp_path, error):
+        takeover, client, screen, executor = _build(tmp_path, [])
+        screen.get_current_screen = MagicMock(side_effect=error)
+        with pytest.raises(type(error)):
+            takeover.run("t")
+        assert client.calls == []
+
+    def test_error_in_observer_propagates(self, tmp_path, error):
+        takeover, client, screen, executor = _build(tmp_path, [])
+
+        def boom(grid=False):
+            raise error
+        takeover.observer = boom
+        with pytest.raises(type(error)):
+            takeover.run("t")
+        assert client.calls == []
+
+    def test_error_in_executor_propagates(self, tmp_path, error):
+        takeover, client, screen, executor = _build(tmp_path, [{"action": "click", "id": 1}] * 3)
+        executor.execute = MagicMock(side_effect=error)
+        with pytest.raises(type(error)):
+            takeover.run("t")
+        assert executor.execute.call_count == 1
+
+    def test_ordinary_executor_error_is_failed_step_not_crash(self, tmp_path):
+        takeover, client, screen, executor = _build(
+            tmp_path, [{"action": "click", "id": 1}, {"action": "give_up", "reason": "x"}])
+        executor.execute = MagicMock(side_effect=ValueError("后台输入不支持此按键"))
+        result = takeover.run("t")
+        assert not result.success and result.steps == 2
+        assert "执行失败" in _user_text(client.calls[1])
+
+    def test_summary_written_when_interrupted(self, tmp_path, error):
+        takeover, client, screen, executor = _build(tmp_path, [])
+        screen.get_current_screen = MagicMock(side_effect=error)
+        with pytest.raises(type(error)):
+            takeover.run("t")
+        summaries = [os.path.join(root, "summary.json") for root, _, files in os.walk(tmp_path / "rec") if "summary.json" in files]
+        assert "interrupted" in json.load(open(summaries[0], encoding="utf-8"))["reason"]
+
+    def test_try_takeover_reraises_and_resets_active(self, monkeypatch, error):
+        monkeypatch.setenv(lc.ENV_API_KEY, KEY)
+
+        class _Boom:
+            def run(self, trigger, goal):
+                raise error
+        with pytest.raises(type(error)):
+            tk.try_takeover("t", cfg=_config(), build=lambda cfg, key: _Boom())
+        assert tk.is_active() is False
+        # 次数照常计入：重新来一次仍然受 max_per_run 约束
+        assert tk._count == 1

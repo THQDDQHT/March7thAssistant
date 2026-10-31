@@ -122,6 +122,9 @@ class Screen(metaclass=SingletonMeta):
         try:
             from module.llm_agent.takeover import ANY_KNOWN, try_takeover
             return try_takeover(trigger, ANY_KNOWN)
+        except (InputInterrupted, GameWindowLost):
+            # 后台输入需要用户处理或游戏窗口已丢失：原样向上抛，不能当作接管失败吞掉
+            raise
         except Exception as e:
             self.logger.debug(f"大模型接管不可用：{e}")
             return False

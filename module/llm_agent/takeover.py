@@ -15,8 +15,9 @@ from dataclasses import dataclass, field
 from typing import Callable, List, Optional
 
 from module.llm_agent import config as llm_config
-from module.llm_agent.actions import ActionExecutor, normalize_action
+from module.llm_agent.actions import ActionExecutor, ActionResult, normalize_action
 from module.llm_agent.client import LLMClient, LLMError, build_step_message, build_system_prompt
+from module.llm_agent.errors import reraise_passthrough
 from module.llm_agent.guard import RULE_INVALID_ACTION, Guard, Verdict
 from module.llm_agent.observe import observe
 from module.logger import log
@@ -172,6 +173,7 @@ class Takeover:
             recognized = bool(screen.get_current_screen(autotry=False))
             screen_id = screen.current_screen if recognized else None
         except Exception as e:
+            reraise_passthrough(e)  # 窗口丢失、需要用户处理的后台输入异常不能吞掉
             _warn(f"大模型接管：检测界面失败：{_safe(e)}")
             return False, None
         if not recognized:
@@ -236,6 +238,7 @@ class Takeover:
                 observation = self.observer(grid=grid)
                 image_jpeg = observation.annotated_jpeg()
             except Exception as e:
+                reraise_passthrough(e)
                 run.reason = f"观察失败：{_safe(e)}"
                 record["error"] = run.reason
                 return False
@@ -298,7 +301,11 @@ class Takeover:
                 run.history.append(f"第 {step} 步 done：失败，画面仍然不是已知界面，继续处理")
                 return True
 
-            result = self.executor.execute(action, observation)
+            try:
+                result = self.executor.execute(action, observation)
+            except Exception as e:
+                reraise_passthrough(e)
+                result = ActionResult(False, f"执行失败：{_safe(e)}")
             record["executed"] = {"ok": result.ok, "message": result.message}
             self._sleep(SETTLE_SECONDS)
             reached, screen_id = self._check_screen(goal)
@@ -368,6 +375,7 @@ def try_takeover(trigger: str, goal: str = ANY_KNOWN, cfg: Optional[llm_config.T
         takeover = (build or _build_takeover)(cfg, api_key)
         return takeover.run(trigger, goal).success
     except Exception as e:
+        reraise_passthrough(e)  # InputInterrupted / GameWindowLost 原样抛给任务；其余错误按接管失败处理
         _error(f"大模型接管出错：{_safe(e)}")
         return False
     finally:

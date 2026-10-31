@@ -105,24 +105,31 @@ class ActionExecutor:
             element = observation.get(action.params["id"])
             if element is None:
                 return ActionResult(False, f"没有编号为 {action.params['id']} 的元素")
-            self._click_rect(element.box)
+            if not self._click_rect(element.box):
+                return ActionResult(False, f"点击 [{element.id}] {element.text} 没有完成（窗口不可用或鼠标被占用）")
             return ActionResult(True, f"点击了 [{element.id}] {element.text}")
         if action.name == "click_grid":
             rect = cell_rect(action.params["cell"], observation.size)
             if rect is None:
                 return ActionResult(False, f"格子 {action.params['cell']} 不合法")
             left, top, right, bottom = rect
-            self._click_rect([[left, top], [right, top], [right, bottom], [left, bottom]])
+            if not self._click_rect([[left, top], [right, top], [right, bottom], [left, bottom]]):
+                return ActionResult(False, f"点击格子 {action.params['cell']} 没有完成（窗口不可用或鼠标被占用）")
             return ActionResult(True, f"点击了格子 {action.params['cell']}")
         if action.name == "press_key":
-            self.auto.press_key(action.params["key"])
+            if self.auto.press_key(action.params["key"]) is False:
+                return ActionResult(False, f"按 {action.params['key']} 键没有完成（窗口不可用）")
             return ActionResult(True, f"按了 {action.params['key']} 键")
         if action.name == "wait":
             self._sleep(action.params["seconds"])
             return ActionResult(True, f"等待了 {action.params['seconds']:g} 秒")
         return ActionResult(True, "")
 
-    def _click_rect(self, box):
-        """截图坐标的框 → 屏幕绝对坐标（先除以 scale，再加 screenshot_pos）→ 点击中心。"""
+    def _click_rect(self, box) -> bool:
+        """截图坐标的框 → 屏幕绝对坐标（先除以 scale，再加 screenshot_pos）→ 点击中心。
+
+        点击走 auto 的输入层，所以上游的后台输入模式自动生效；返回 False 表示点击没有完成
+        （后台输入遇到窗口不可用、鼠标被占用等可恢复情况）。InputInterrupted / GameWindowLost 会原样抛出。
+        """
         absolute = self.auto.calculate_text_position(box, relative=False)
-        self.auto.click_element_with_pos(absolute)
+        return self.auto.click_element_with_pos(absolute) is not False
