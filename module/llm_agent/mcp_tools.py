@@ -41,6 +41,13 @@ from module.llm_agent.search import DeepSeekSearch, SearchError, format_results,
 # 所以放行全部单个字母和数字；危险操作仍由护栏拦（画面有危险词时只允许 esc），F1 之类的功能键和组合键不放行
 MCP_ALLOWED_KEYS = ("esc", "enter", "space") + tuple("abcdefghijklmnopqrstuvwxyz") + tuple("0123456789")
 HOLD_MAX = 5.0
+# press_keys：一串最多 8 项；键之间默认的间隔 0.1–2 秒；wait 项每个 0.1–5 秒，合计不超过 8 秒
+KEYS_MAX_ITEMS = 8
+KEYS_GAP_MIN, KEYS_GAP_MAX = 0.1, 2.0
+KEYS_WAIT_MIN, KEYS_WAIT_MAX = 0.1, 5.0
+KEYS_WAIT_TOTAL_MAX = 8.0
+# press_keys 里不允许出现的键：esc、enter 会改变界面状态，要单独按并看画面
+KEYS_FORBIDDEN = ("esc", "enter")
 WAIT_MIN, WAIT_MAX = 1.0, 10.0
 SCROLL_MIN, SCROLL_MAX = 1, 10
 TIMEOUT_MINUTES_MAX = 60
@@ -899,6 +906,84 @@ class McpTools:
 
         # esc 在任何画面下都允许，不需要看画面；其它键护栏要看当下的画面
         return self._act("press_key", args, plan, "optional" if key_name == "esc" else "fresh")
+
+    def press_keys(self, keys, gap_seconds=0.3) -> ToolOutput:
+        """战斗连招：按顺序连发几个键（可夹 "wait:秒数" 暂停），用于在出手动画期间预输入终结技。"""
+        args = {"keys": keys, "gap_seconds": gap_seconds}
+        if isinstance(keys, str):  # 模型有时会把列表传成逗号分隔的字符串
+            keys = [part for part in re.split(r"[,，]", keys) if part.strip()]
+        if not isinstance(keys, (list, tuple)):
+            return self._invalid("press_keys", args, "keys 必须是字符串列表，例如 [\"space\", \"2\"]。")
+        if not 1 <= len(keys) <= KEYS_MAX_ITEMS:
+            return self._invalid("press_keys", args, f"keys 必须有 1–{KEYS_MAX_ITEMS} 项。")
+        gap = _as_float(gap_seconds)
+        if gap is None or not KEYS_GAP_MIN <= gap <= KEYS_GAP_MAX:
+            return self._invalid("press_keys", args, f"gap_seconds 必须在 {KEYS_GAP_MIN:g} 到 {KEYS_GAP_MAX:g} 秒之间。")
+
+        items = []  # ("key", 键名) 或 ("wait", 秒数)
+        wait_total = 0.0
+        for index, item in enumerate(keys, 1):
+            if not isinstance(item, str):
+                return self._invalid("press_keys", args, f"第 {index} 项必须是字符串（键名或 \"wait:秒数\"）。")
+            text = item.strip().lower().replace(" ", "")
+            if text.startswith("wait:") or text.startswith("wait："):
+                seconds = _as_float(text[5:])
+                if seconds is None or not KEYS_WAIT_MIN <= seconds <= KEYS_WAIT_MAX:
+                    return self._invalid("press_keys", args, f"第 {index} 项 {item!r}：wait 的秒数必须在 "
+                                                              f"{KEYS_WAIT_MIN:g} 到 {KEYS_WAIT_MAX:g} 之间，格式如 \"wait:1.5\"。")
+                wait_total += seconds
+                items.append(("wait", seconds))
+                continue
+            action, error = normalize_action({"action": "press_key", "key": item})
+            if action is None:
+                return self._invalid("press_keys", args, f"第 {index} 项：{error}")
+            key_name = action.params["key"]
+            if key_name in KEYS_FORBIDDEN:
+                return self._invalid("press_keys", args, f"第 {index} 项 {key_name}：连发序列里不能有 esc 和 enter"
+                                                          f"（它们会改变界面状态，请用 press_key 单独按，看完画面再继续）。")
+            if key_name not in MCP_ALLOWED_KEYS:
+                return self._invalid("press_keys", args, f"第 {index} 项 {key_name!r} 不是允许的按键"
+                                                          f"（只允许 space 和单个字母或数字）。")
+            items.append(("key", key_name))
+        key_names = [value for kind, value in items if kind == "key"]
+        if not key_names:
+            return self._invalid("press_keys", args, "keys 里至少要有一个键，不能全是 wait。")
+        if wait_total > KEYS_WAIT_TOTAL_MAX:
+            return self._invalid("press_keys", args, f"wait 项合计 {wait_total:g} 秒，不能超过 {KEYS_WAIT_TOTAL_MAX:g} 秒。")
+
+        def describe(kind, value):
+            return value if kind == "key" else f"等 {value:g} 秒"
+
+        def plan(observation):
+            # 每个键都单独过护栏；任何一个不放行就整串拒绝，一个键都不发
+            for number, key_name in enumerate(key_names, 1):
+                action, _ = normalize_action({"action": "press_key", "key": key_name})
+                verdict = self.guard.check(action, observation)
+                if not verdict.allowed:
+                    return _Plan(Verdict(False, verdict.rule, f"第 {number} 个键 {key_name}：{verdict.reason}"))
+
+            def run():
+                number = 0
+                previous = None
+                for kind, value in items:
+                    if kind == "wait":
+                        self._sleep(value)
+                    else:
+                        if previous == "key":
+                            self._sleep(gap)
+                        number += 1
+                        result = self.executor.press(value, 0)
+                        if not result.ok:
+                            return ActionResult(False, f"发到第 {number} 个键 {value} 失败：{result.message}"
+                                                       f"（后面的键没有发）")
+                    previous = kind
+                return ActionResult(True, "依次按了 " + " → ".join(describe(*item) for item in items)
+                                    + f"（间隔 {gap:g} 秒）")
+
+            return _Plan(ALLOW, run, "press_keys " + ",".join(
+                value if kind == "key" else f"wait:{value:g}" for kind, value in items) + f" gap={gap:g}")
+
+        return self._act("press_keys", args, plan, "fresh")
 
     def _point(self, observation, element_id, cell) -> Tuple[Optional[Tuple[int, int]], str]:
         """滚动位置：元素 id、格子，或者（都不给时）画面中央 → 截图坐标的点。"""

@@ -433,6 +433,154 @@ class TestPressKey:
         assert "没有完成" in env.tools.press_key("esc").text
 
 
+# ---------------------------------------------------------------- press_keys ----
+
+class TestPressKeys:
+    def _pressed(self, env):
+        return [call[1] for call in env.auto.calls if call[0] == "press_key"]
+
+    def test_sequence_in_order_with_gaps(self, env):
+        env.tools.observe()
+        env.sleeps.clear()
+        out = env.tools.press_keys(["e", "space", "2"])
+        assert self._pressed(env) == ["e", "space", "2"]
+        assert env.auto.calls == [("press_key", key, 0.2) for key in ("e", "space", "2")]  # 轻按，hold 为 0
+        assert env.sleeps.count(0.3) == 2
+        assert "依次按了 e → space → 2（间隔 0.3 秒）" in out.text
+        assert out.image is not None  # 带新的观察
+
+    def test_keys_normalized(self, env):
+        env.tools.observe()
+        env.tools.press_keys([" Space ", "E"])
+        assert self._pressed(env) == ["space", "e"]
+
+    @pytest.mark.parametrize("keys", ["space,2", "space，2", " space , 2 "])
+    def test_string_keys_are_split(self, env, keys):
+        env.tools.observe()
+        out = env.tools.press_keys(keys)
+        assert self._pressed(env) == ["space", "2"]
+        assert "依次按了" in out.text
+
+    def test_custom_gap(self, env):
+        env.tools.observe()
+        env.sleeps.clear()
+        out = env.tools.press_keys(["space", "2"], gap_seconds=0.5)
+        assert env.sleeps.count(0.5) == 1 and "间隔 0.5 秒" in out.text
+
+    def test_wait_item_replaces_gap(self, env):
+        env.tools.observe()
+        env.sleeps.clear()
+        out = env.tools.press_keys(["space", "wait:1.5", "2"])
+        assert self._pressed(env) == ["space", "2"]
+        assert env.sleeps == [1.5, 0]  # 只有 wait 本身和 _act 里等稳定的 settle_seconds（测试里为 0），没有额外的 gap
+        assert "依次按了 space → 等 1.5 秒 → 2" in out.text
+
+    def test_leading_and_trailing_wait(self, env):
+        env.tools.observe()
+        env.sleeps.clear()
+        env.tools.press_keys(["wait:1", "space", "wait:2"])
+        assert self._pressed(env) == ["space"]
+        assert env.sleeps == [1.0, 2.0, 0]
+
+    @pytest.mark.parametrize("keys, reason", [
+        (["space", "esc"], "esc"),
+        (["enter", "2"], "enter"),
+        (["ESC"], "esc"),
+        (["e"] * 9, "1–8"),
+        ([], "1–8"),
+        ("", "1–8"),
+        (["wait:1", "wait:2"], "至少"),
+        (["space", "wait:0.05"], "秒数"),
+        (["space", "wait:6"], "秒数"),
+        (["space", "wait:abc"], "秒数"),
+        (["space", "wait:5", "wait:4"], "合计"),
+        (["space", "f1"], "f1"),
+        (["space", "ctrl+w"], "ctrl+w"),
+        (["space", 2], "字符串"),
+        (["space", ""], "key"),
+        (123, "字符串列表"),
+        (None, "字符串列表"),
+    ])
+    def test_invalid_keys_refused(self, env, keys, reason):
+        env.tools.observe()
+        out = env.tools.press_keys(keys)
+        assert "【未执行】" in out.text or "【被拒绝】" in out.text
+        assert reason in out.text
+        assert env.auto.calls == []
+
+    @pytest.mark.parametrize("gap", [0, 0.05, 2.5, 60, -1, "abc", None])
+    def test_gap_out_of_range_refused(self, env, gap):
+        env.tools.observe()
+        out = env.tools.press_keys(["space", "2"], gap)
+        assert "gap_seconds" in out.text
+        assert env.auto.calls == []
+
+    def test_eight_items_allowed(self, env):
+        env.tools.observe()
+        env.tools.press_keys(["e"] * 8)
+        assert self._pressed(env) == ["e"] * 8
+
+    def test_wait_total_exactly_limit_allowed(self, env):
+        env.tools.observe()
+        env.tools.press_keys(["space", "wait:4", "wait:4", "2"])
+        assert self._pressed(env) == ["space", "2"]
+
+    def test_danger_word_refuses_whole_sequence(self, tmp_path):
+        env = Env(tmp_path, texts=("确认购买",))
+        env.tools.observe()
+        out = env.tools.press_keys(["space", "2"])
+        assert "danger_key" in out.text and "第 1 个键 space" in out.text
+        assert env.auto.calls == []
+
+    def test_guard_reports_failing_key_position(self, env):
+        env.tools.observe()
+        real_check = env.tools.guard.check
+
+        def check(action, observation):
+            if action.params.get("key") == "2":
+                return gd.Verdict(False, "danger_key", "测试拒绝")
+            return real_check(action, observation)
+
+        env.tools.guard.check = check
+        out = env.tools.press_keys(["e", "space", "2"])
+        assert "第 3 个键 2：测试拒绝" in out.text
+        assert env.auto.calls == []  # 前两个键也没有发
+
+    def test_stops_at_first_failure(self, env):
+        env.tools.observe()
+        presses = []
+
+        def press(key, hold):
+            presses.append((key, hold))
+            if len(presses) == 2:
+                return mt.ActionResult(False, "窗口不可用")
+            return mt.ActionResult(True, f"按了 {key} 键")
+
+        env.tools.executor.press = press
+        out = env.tools.press_keys(["e", "space", "2"])
+        assert presses == [("e", 0), ("space", 0)]
+        assert "结果（失败）" in out.text and "第 2 个键 space 失败" in out.text and "窗口不可用" in out.text
+
+    def test_failure_position_counts_keys_not_waits(self, env):
+        env.tools.observe()
+        env.auto.fail = True
+        out = env.tools.press_keys(["wait:1", "e", "2"])
+        assert "第 1 个键 e 失败" in out.text
+        assert len([c for c in env.auto.calls if c[0] == "press_key"]) == 1
+
+    def test_observes_first_when_stale(self, env):
+        env.tools.observe()
+        env.now += mt.STALE_SECONDS + 1
+        env.tools.press_keys(["space", "2"])
+        assert env.observe_calls == [False, False, False]
+
+    def test_record_written(self, env):
+        env.tools.observe()
+        env.tools.press_keys(["space", "wait:1", "2"])
+        record = env.records("press_keys")[0]
+        assert record["result"]["ok"] is True
+
+
 # ---------------------------------------------------------------- scroll / drag / wait ----
 
 class TestScroll:

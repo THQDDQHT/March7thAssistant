@@ -16,7 +16,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
-EXPECTED_TOOLS = sorted("""observe click click_grid press_key scroll drag wait list_screens goto_screen list_m7a_tasks
+EXPECTED_TOOLS = sorted("""observe click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
     run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user list_characters get_m7a_config set_m7a_config""".split())
 
 
@@ -111,6 +111,9 @@ class TestRegistration:
         assert by_name["click"].inputSchema["required"] == ["id"]
         assert by_name["click"].inputSchema["properties"]["id"]["type"] == "integer"
         assert by_name["press_key"].inputSchema["properties"]["hold_seconds"]["default"] == 0
+        assert by_name["press_keys"].inputSchema["required"] == ["keys"]
+        assert by_name["press_keys"].inputSchema["properties"]["keys"]["type"] == "array"
+        assert by_name["press_keys"].inputSchema["properties"]["gap_seconds"]["default"] == 0.3
         assert by_name["scroll"].inputSchema["required"] == ["direction"]
         assert by_name["fetch_page"].inputSchema["properties"]["max_chars"]["default"] == 8000
         assert all(tool.description for tool in tools)
@@ -130,6 +133,8 @@ class TestRegistration:
 
         async def run():
             await mcp.call_tool("press_key", {"key": "w", "hold_seconds": 2})
+            await mcp.call_tool("press_keys", {"keys": ["space", "2"]})
+            await mcp.call_tool("press_keys", {"keys": ["e"], "gap_seconds": 0.5})
             await mcp.call_tool("scroll", {"direction": "up", "amount": 2, "cell": "H5"})
             await mcp.call_tool("drag", {"from_cell": "A1", "to_cell": "B2"})
             await mcp.call_tool("leave_for_user", {"item": "活动", "reason": "难"})
@@ -143,7 +148,7 @@ class TestRegistration:
 
         asyncio.run(run())
         assert tools.calls == [
-            ("press_key", ("w", 2.0)), ("scroll", ("up", 2, None, "H5")), ("drag", ("A1", "B2")),
+            ("press_key", ("w", 2.0)), ("press_keys", (["space", "2"], 0.3)), ("press_keys", (["e"], 0.5)), ("scroll", ("up", 2, None, "H5")), ("drag", ("A1", "B2")),
             ("leave_for_user", ("活动", "难", "")), ("web_search", ("攻略", 8)),
             ("resolve_todo", ("活动", "")), ("get_m7a_config", (["forgottenhall_level"],)), ("get_m7a_config", ([],)),
             ("set_m7a_config", ("forgottenhall_level", [1, 12])), ("set_m7a_config", ("forgottenhall_enable", True)),

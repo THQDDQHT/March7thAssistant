@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 from logging.handlers import RotatingFileHandler
-from typing import Annotated, Any, Callable, Optional, Union
+from typing import Annotated, Any, Callable, List, Optional, Union
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -135,6 +135,13 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def press_key(key: Annotated[str, Field(description="按键名")],
                         hold_seconds: Annotated[float, Field(description="按住秒数，0 表示轻按；最多 5")] = 0):
         return await call(tools.press_key, key, hold_seconds)
+
+    @tool("战斗连招：一次调用按顺序连发几个键（1–8 项），键之间默认隔 0.3 秒，用于在出手动画期间预输入终结技，"
+          "例如 [\"space\",\"2\"] 表示确认出手后马上排上 2 号位的终结技；也可以插入 \"wait:秒数\" 暂停（0.1–5 秒，合计不超过 8 秒）。"
+          "只在战斗中使用；不能包含 esc、enter；每个键都过护栏，画面有危险词时整串拒绝。执行完自动返回新画面。")
+    async def press_keys(keys: Annotated[List[str], Field(description="按键序列，1–8 项；每项是键名（如 space、2、e）或 \"wait:秒数\"，例如 [\"space\",\"wait:1.5\",\"2\"]")],
+                         gap_seconds: Annotated[float, Field(description="相邻两个键之间的间隔秒数，0.1–2")] = 0.3):
+        return await call(tools.press_keys, keys, gap_seconds)
 
     @tool("滚动鼠标滚轮。位置用元素 id 或格子 cell 指定，都不给就在画面中央。执行后自动返回新画面。")
     async def scroll(direction: Annotated[str, Field(description="up 或 down")],
