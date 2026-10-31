@@ -56,7 +56,9 @@ def _compact(text: str) -> str:
 
 
 class Guard:
-    def __init__(self, extra_danger_words: Iterable[str] = ()):
+    def __init__(self, extra_danger_words: Iterable[str] = (), allowed_keys: Iterable[str] = ALLOWED_KEYS):
+        # 按键白名单做成参数：接管用默认的 ALLOWED_KEYS，第二期 MCP 工具传入扩充后的白名单
+        self.allowed_keys = tuple(str(key).strip().lower() for key in allowed_keys)
         extra = tuple(_compact(str(word)) for word in extra_danger_words if _compact(str(word)))
         # 去重并保持顺序
         self.danger_words = tuple(dict.fromkeys(DANGER_WORDS + extra))
@@ -95,8 +97,8 @@ class Guard:
             return self._check_click_grid(observation)
         if name == "press_key":
             key = str(action.params.get("key", "")).strip().lower()
-            if key not in ALLOWED_KEYS:
-                return Verdict(False, RULE_KEY_NOT_ALLOWED, f"按键 {key!r} 不在白名单内，只允许 {', '.join(ALLOWED_KEYS)}")
+            if key not in self.allowed_keys:
+                return Verdict(False, RULE_KEY_NOT_ALLOWED, f"按键 {key!r} 不在白名单内，只允许 {', '.join(self.allowed_keys)}")
             if key != SAFE_KEY_ON_DANGER:
                 word = self.screen_danger_word(observation.all_texts())
                 if word:

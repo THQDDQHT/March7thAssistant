@@ -10,5 +10,10 @@ M7A 认不出当前游戏界面、或者切换界面超时的时候，不再直�
 - takeover.py：接管循环、上限控制、记录
 - cli.py：开发用命令行（observe / decide / takeover）
 
+第二期（MCP server，把 M7A 的能力包装成工具，让 Codex 直接操作游戏）：
+- mcp_tools.py：全部工具逻辑（不依赖 mcp 包，可单测）
+- search.py：DeepSeek Search / Fetch 客户端
+- mcp_server.py：FastMCP 接线、token 中间件、启动参数（需要 mcp>=1.20,<2，用 uv run --with 叠加）
+
 工具层（observe / guard / actions）不依赖 DeepSeek。默认关闭，见 config.example.yaml 的 llm_takeover_* 配置。
 """
