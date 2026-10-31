@@ -18,6 +18,7 @@ class Screen(metaclass=SingletonMeta):
     """
 
     SCREEN_MATCH_THRESHOLD = 0.88
+    _llm_retrying = False  # 大模型接管成功后重试切换界面的过程中，不再触发新的接管
 
     def __init__(self, config_path, logger: Optional[Logger] = None):
         """
@@ -113,6 +114,18 @@ class Screen(metaclass=SingletonMeta):
                 "建议关闭帧率/硬件监控悬浮窗（如 FPS、CPU、GPU、RTSS、Afterburner 等）后重试"
             )
 
+    def _try_llm_takeover(self, trigger):
+        """
+        异常接管钩子：交给大模型把画面拉回已知界面（默认关闭，没有 key 时也不生效）。
+        :return: 接管成功返回 True；关闭、没有 key、重入、超过次数、失败或出错都返回 False，调用方走原来的流程。
+        """
+        try:
+            from module.llm_agent.takeover import ANY_KNOWN, try_takeover
+            return try_takeover(trigger, ANY_KNOWN)
+        except Exception as e:
+            self.logger.debug(f"大模型接管不可用：{e}")
+            return False
+
     def _handle_autotry(self):
         """
         处理自动重试逻辑，包括按ESC键和处理特定的异常情况。
@@ -203,6 +216,8 @@ class Screen(metaclass=SingletonMeta):
                 return True
 
             if autotry:
+                if i + 1 == cfg.get_value("llm_takeover_after_retries", 3) and self._try_llm_takeover("get_current_screen"):
+                    return True
                 self._handle_autotry()
             else:
                 self.logger.debug("未识别出任何界面，请确保游戏画面干净")
@@ -419,6 +434,13 @@ class Screen(metaclass=SingletonMeta):
             if max_recursion > 0:
                 self.logger.warning(f"切换到 {self.get_name(next_screen)} 超时，准备重试")
                 self.change_to(next_screen, max_recursion=max_recursion - 1)
+            elif not self._llm_retrying and self._try_llm_takeover("wait_for_screen_change"):
+                # 接管成功：画面已回到已知界面，再尝试切换一次（这次失败不再接管，直接报错）
+                self._llm_retrying = True
+                try:
+                    self.change_to(next_screen, max_recursion=0)
+                finally:
+                    self._llm_retrying = False
             else:
                 self.log_and_raise(f"无法切换到 {self.get_name(next_screen)}", "无法切换到指定游戏界面")
 
