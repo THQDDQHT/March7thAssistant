@@ -71,9 +71,6 @@ TASK_DENYLIST = {
     "mobileui_update": "会更新触屏模式",
 }
 
-# 操作类工具：有 M7A 任务在跑时一律拒绝
-OPERATION_TOOLS = ("click", "click_grid", "press_key", "scroll", "drag", "wait", "goto_screen", "run_m7a_task")
-
 # 规则编号（写进记录）
 RULE_TASK_RUNNING = "task_running"
 RULE_NO_OBSERVATION = "no_observation"
