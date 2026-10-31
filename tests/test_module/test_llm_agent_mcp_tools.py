@@ -653,6 +653,7 @@ class TestTasks:
         monkeypatch.setenv("MARCH7TH_CONFIG_READONLY", "1")
         monkeypatch.setenv("M7A_MCP_TOKEN", "tok-secret-xxxxxxxxxxxx")
         monkeypatch.setenv("DEEPSEEK_API_KEY", KEY)
+        monkeypatch.setenv("M7A_LLM_TAKEOVER_DISABLE", "1")
         env.run_output = TASKS_JSON
         log_path = os.path.join(env.tmp_path, "20261031-120000-abcd.log")
         with open(log_path, "w", encoding="utf-8") as file:
@@ -666,6 +667,7 @@ class TestTasks:
                            "--run-id", "20261031-120000-abcd"]
         assert kwargs["cwd"] == env.tmp_path
         assert "MARCH7TH_CONFIG_READONLY" not in kwargs["env"] and "M7A_MCP_TOKEN" not in kwargs["env"]
+        assert "M7A_LLM_TAKEOVER_DISABLE" not in kwargs["env"]  # 任务进程里仍保留第一期接管
         assert kwargs["env"]["DEEPSEEK_API_KEY"] == KEY  # 任务自己的接管功能要用
         assert "状态：success（退出码 0）" in out.text
         assert "第 99 行" in out.text and "第 0 行" not in out.text  # 只有末尾
@@ -926,3 +928,75 @@ class TestGuardAllowedKeysParameter:
         for key in "wasdeq1234":
             assert guard.check(Action("press_key", {"key": key}), make_obs()).allowed
         assert not guard.check(Action("press_key", {"key": "tab"}), make_obs()).allowed
+
+
+# ---------------------------------------------------------------- resolve_todo ----
+
+class TestResolveTodo:
+    def _path(self, env):
+        return os.path.join(env.tmp_path, "rec", "todo_for_user.md")
+
+    def test_exact_match_marks_done_with_note_and_time(self, env):
+        env.tools.leave_for_user("彩蛋小游戏", "即时操作")
+        env.tools.leave_for_user("回合制副本", "手动战斗")
+        out = env.tools.resolve_todo("彩蛋小游戏", "自己打通了")
+        assert "已把「彩蛋小游戏」标为已处理" in out.text and "当前未处理 1 条" in out.text and "回合制副本" in out.text
+        text = open(self._path(env), encoding="utf-8").read()
+        assert "- [x] " in text and "**彩蛋小游戏**" in text
+        done_block = text.split("- [x] ")[1].split("- [ ] ")[0]
+        assert "已处理：" in done_block and "自己打通了" in done_block
+        assert "- [ ] " in text and "回合制副本" in text.split("- [ ] ")[1]
+        # list_todo_for_user 只列未处理
+        listed = env.tools.list_todo_for_user().text
+        assert "回合制副本" in listed and "彩蛋小游戏" not in listed
+        record = env.records("resolve_todo")[0]
+        assert record["status"] == "resolved" and record["pending"] == 1
+
+    def test_exact_name_wins_over_substring(self, env):
+        env.tools.leave_for_user("活动", "a")
+        env.tools.leave_for_user("活动商店", "b")
+        out = env.tools.resolve_todo("活动")
+        assert "已把「活动」标为已处理" in out.text and "活动商店" in out.text
+
+    def test_substring_match_both_directions(self, env):
+        env.tools.leave_for_user("「彩蛋」小游戏活动", "x")
+        assert "已把「「彩蛋」小游戏活动」标为已处理" in env.tools.resolve_todo("彩蛋").text
+        env.tools.leave_for_user("回合制", "y")
+        assert "已把「回合制」标为已处理" in env.tools.resolve_todo("回合制副本第三关").text
+
+    def test_ambiguous_lists_pending_and_changes_nothing(self, env):
+        env.tools.leave_for_user("小游戏 A", "x")
+        env.tools.leave_for_user("小游戏 B", "y")
+        before = open(self._path(env), encoding="utf-8").read()
+        out = env.tools.resolve_todo("小游戏")
+        assert "【未执行】" in out.text and "匹配到多条" in out.text and "小游戏 A" in out.text and "小游戏 B" in out.text
+        assert open(self._path(env), encoding="utf-8").read() == before
+
+    def test_no_match_lists_pending(self, env):
+        env.tools.leave_for_user("小游戏 A", "x")
+        out = env.tools.resolve_todo("别的事")
+        assert "没有名称匹配" in out.text and "当前未处理 1 条" in out.text and "小游戏 A" in out.text
+
+    def test_no_file_and_empty_item(self, env):
+        assert "没有名称匹配" in env.tools.resolve_todo("x").text
+        assert "item" in env.tools.resolve_todo("  ").text
+
+    def test_already_done_items_are_not_matched(self, env):
+        env.tools.leave_for_user("活动 A", "x")
+        env.tools.resolve_todo("活动 A")
+        out = env.tools.resolve_todo("活动 A")
+        assert "没有名称匹配" in out.text and "当前没有未处理的事项" in out.text
+
+    def test_last_item_reports_empty_list_and_file_stays_parseable(self, env):
+        env.tools.leave_for_user("活动 A", "x", "主界面 → 活动")
+        out = env.tools.resolve_todo("活动 A")
+        assert "当前没有未处理的事项了" in out.text
+        assert env.tools.todo.pending_text() == (0, "")
+        # 之后同名事项可以再次记录
+        assert "已记入" in env.tools.leave_for_user("活动 A", "又出现了").text
+        assert env.tools.todo.pending_text()[0] == 1
+
+    def test_resolve_works_while_task_runs(self, env):
+        env.tools.leave_for_user("活动 A", "x")
+        env.runs.active = {"task": "daily", "run_id": "r1"}
+        assert "已把「活动 A」标为已处理" in env.tools.resolve_todo("活动 A").text

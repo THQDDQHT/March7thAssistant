@@ -21,7 +21,7 @@ def _click(element_id):
 class TestDangerWordsConstant:
     def test_table_contents(self):
         expected = ["购买", "支付", "充值", "跃迁", "星琼", "古老梦华", "专票", "通票",
-                    "兑换", "分解", "弃置", "出售", "删除", "消耗", "确认支付"]
+                    "兑换", "分解", "弃置", "出售", "删除", "确认支付"]
         assert list(gd.DANGER_WORDS) == expected
 
     def test_extra_words_appended(self):
@@ -54,7 +54,7 @@ class TestRule2DangerTarget:
 class TestRule3ConfirmWithDangerOnScreen:
     @pytest.mark.parametrize("text", ["确认", "确定", "是", "同意", " 确 认 ", "确认。"])
     def test_confirm_text_blocked_when_danger_on_screen(self, text):
-        verdict = gd.Guard().check(_click(1), _obs([text, "是否消耗 60 开拓力"]))
+        verdict = gd.Guard().check(_click(1), _obs([text, "是否消耗 60 星琼"]))
         assert not verdict.allowed
         assert verdict.rule == gd.RULE_DANGER_CONFIRM
 
@@ -63,6 +63,19 @@ class TestRule3ConfirmWithDangerOnScreen:
         verdict = gd.Guard().check(_click(1), obs)
         assert not verdict.allowed
         assert verdict.rule == gd.RULE_DANGER_CONFIRM
+
+    @pytest.mark.parametrize("text", ["确认", "确定", "是"])
+    def test_confirm_allowed_when_only_spending_stamina(self, text):
+        # 开拓力随便花：「消耗」不再是危险词，「是否消耗 60 开拓力」的确认框可以点确认
+        assert gd.Guard().check(_click(1), _obs([text, "是否消耗 60 开拓力"])).allowed
+        assert gd.Guard().check(Action("press_key", {"key": "enter"}), _obs([text, "是否消耗 60 开拓力"])).allowed
+
+    def test_consuming_premium_currency_still_blocked(self):
+        assert not gd.Guard().check(_click(1), _obs(["确认", "消耗星琼"])).allowed
+        assert not gd.Guard().check(_click(1), _obs(["消耗古老梦华"])).allowed
+
+    def test_consume_is_not_a_danger_word(self):
+        assert "消耗" not in gd.DANGER_WORDS
 
     def test_confirm_allowed_without_danger(self):
         assert gd.Guard().check(_click(1), _obs(["确认", "网络连接已断开"])).allowed

@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 ENV_API_KEY = "DEEPSEEK_API_KEY"
+# 设为 1/true 时整个进程不做第一期的接管（MCP server 里由外部 agent 看图决策，不再嵌套一层）
+ENV_TAKEOVER_DISABLE = "M7A_LLM_TAKEOVER_DISABLE"
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-flash"
@@ -80,6 +82,11 @@ def load_config(get_value=None) -> TakeoverConfig:
         max_per_run=_as_int(get_value("llm_takeover_max_per_run", DEFAULT_MAX_PER_RUN), DEFAULT_MAX_PER_RUN, minimum=0),
         extra_danger_words=_as_words(get_value("llm_takeover_extra_danger_words", [])),
     )
+
+
+def takeover_disabled() -> bool:
+    """环境变量 M7A_LLM_TAKEOVER_DISABLE 为 1/true 时，本进程禁用接管（优先于 llm_takeover_enable）。"""
+    return os.environ.get(ENV_TAKEOVER_DISABLE, "").strip().lower() in ("1", "true")
 
 
 def get_api_key() -> Optional[str]:

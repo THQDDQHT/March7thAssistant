@@ -17,7 +17,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 EXPECTED_TOOLS = sorted("""observe click click_grid press_key scroll drag wait list_screens goto_screen list_m7a_tasks
-    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user list_todo_for_user""".split())
+    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user""".split())
 
 
 class FakeTools:
@@ -134,11 +134,13 @@ class TestRegistration:
             await mcp.call_tool("drag", {"from_cell": "A1", "to_cell": "B2"})
             await mcp.call_tool("leave_for_user", {"item": "活动", "reason": "难"})
             await mcp.call_tool("web_search", {"query": "攻略"})
+            await mcp.call_tool("resolve_todo", {"item": "活动"})
 
         asyncio.run(run())
         assert tools.calls == [
             ("press_key", ("w", 2.0)), ("scroll", ("up", 2, None, "H5")), ("drag", ("A1", "B2")),
-            ("leave_for_user", ("活动", "难", "")), ("web_search", ("攻略", 8))]
+            ("leave_for_user", ("活动", "难", "")), ("web_search", ("攻略", 8)),
+            ("resolve_todo", ("活动", ""))]
 
     def test_text_only_tool(self):
         mcp = ms.create_mcp(FakeTools())
@@ -178,7 +180,9 @@ class TestMain:
         monkeypatch.setattr(ms, "setup_logging", lambda: None)
         cwd = os.getcwd()
         monkeypatch.delenv("M7A_MCP_TOKEN", raising=False)
-        monkeypatch.delenv("MARCH7TH_CONFIG_READONLY", raising=False)
+        # main() 会往 os.environ 里写这两个变量：先 setenv 一次，让 monkeypatch 在测试结束时还原，不泄露给别的测试
+        monkeypatch.setenv("MARCH7TH_CONFIG_READONLY", "")
+        monkeypatch.setenv("M7A_LLM_TAKEOVER_DISABLE", "")
         monkeypatch.setattr(ms, "read_user_env", lambda name: os.environ.get(name, "").strip() or None)
         self.runs = []
         monkeypatch.setattr("uvicorn.run", lambda app, **kwargs: self.runs.append((app, kwargs)))
@@ -195,6 +199,13 @@ class TestMain:
         assert ms.main(["--no-auth", "--host", "0.0.0.0", "--offline-image", str(self.image)]) == 2
         assert ms.main(["--no-auth", "--host", "192.168.1.5", "--offline-image", str(self.image)]) == 2
         assert self.runs == []
+
+    def test_server_process_disables_first_phase_takeover(self, monkeypatch):
+        assert os.environ["M7A_LLM_TAKEOVER_DISABLE"] == ""
+        assert ms.main(["--no-auth", "--offline-image", str(self.image)]) == 0
+        assert os.environ["M7A_LLM_TAKEOVER_DISABLE"] == "1"
+        from module.llm_agent import config as lc
+        assert lc.takeover_disabled()
 
     def test_no_auth_loopback_starts_with_defaults(self):
         assert ms.main(["--no-auth", "--offline-image", str(self.image)]) == 0

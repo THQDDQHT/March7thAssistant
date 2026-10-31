@@ -25,6 +25,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 ENV_TOKEN = "M7A_MCP_TOKEN"
 ENV_API_KEY = "DEEPSEEK_API_KEY"
+ENV_TAKEOVER_DISABLE = "M7A_LLM_TAKEOVER_DISABLE"
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8770
 MCP_PATH = "/mcp"
@@ -193,6 +194,12 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
                              how_to_reach: Annotated[str, Field(description="怎么进到那个界面")] = ""):
         return await call(tools.leave_for_user, item, reason, how_to_reach)
 
+    @tool("把留给用户的某条事项标为已处理（在 todo_for_user.md 里勾掉并记下说明和时间）。只有这件事真正完成了才调用。"
+          "名称先按完全相同匹配，再按包含关系匹配；匹配不到或匹配到多条会报错并列出未处理清单。返回更新后的未处理清单。")
+    async def resolve_todo(item: Annotated[str, Field(description="事项名称（leave_for_user 时写的 item）")],
+                           note: Annotated[str, Field(description="处理说明，例如怎么完成的")] = ""):
+        return await call(tools.resolve_todo, item, note)
+
     @tool("读出留给用户、还没处理的事项清单。")
     async def list_todo_for_user():
         return await call(tools.list_todo_for_user)
@@ -244,6 +251,8 @@ def main(argv=None) -> int:
         sys.path.insert(0, ROOT)
     if args.offline_image:
         os.environ["MARCH7TH_CONFIG_READONLY"] = "1"  # 离线测试不允许写 config.yaml
+    # server 里由 Codex 看图决策，screen.change_to 等失败时直接返回错误，不再嵌套第一期的 DeepSeek 接管
+    os.environ[ENV_TAKEOVER_DISABLE] = "1"
     setup_logging()
     log = logging.getLogger("m7a.mcp")
 

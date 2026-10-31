@@ -387,6 +387,24 @@ class TestTryTakeover:
         assert tk.try_takeover("t", cfg=_config(enable=False), build=build) is False
         assert built == []
 
+    @pytest.mark.parametrize("value", ["1", "true", "TRUE"])
+    def test_disable_env_turns_takeover_off(self, monkeypatch, value):
+        # MCP server 进程里 M7A_LLM_TAKEOVER_DISABLE=1：即使配置开着、有 key，也不调用模型
+        monkeypatch.setenv(lc.ENV_API_KEY, KEY)
+        monkeypatch.setenv(lc.ENV_TAKEOVER_DISABLE, value)
+        build, built = self._factory()
+        assert tk.try_takeover("t", cfg=_config(enable=True), build=build) is False
+        assert built == []
+        assert tk._count == 0
+
+    @pytest.mark.parametrize("value", ["", "0", "false"])
+    def test_disable_env_falsey_values_do_not_disable(self, monkeypatch, value):
+        monkeypatch.setenv(lc.ENV_API_KEY, KEY)
+        monkeypatch.setenv(lc.ENV_TAKEOVER_DISABLE, value)
+        build, built = self._factory()
+        assert tk.try_takeover("t", cfg=_config(enable=True), build=build) is True
+        assert built == [KEY]
+
     def test_no_key_degrades_with_single_warning(self):
         build, built = self._factory()
         for _ in range(3):

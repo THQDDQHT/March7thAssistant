@@ -17,7 +17,7 @@ from module.llm_agent.actions import Action
 
 DANGER_WORDS = (
     "购买", "支付", "充值", "跃迁", "星琼", "古老梦华", "专票", "通票",
-    "兑换", "分解", "弃置", "出售", "删除", "消耗", "确认支付",
+    "兑换", "分解", "弃置", "出售", "删除", "确认支付",
 )
 CONFIRM_TEXTS = ("确认", "确定", "是", "同意")
 ALLOWED_KEYS = ("esc", "enter", "space", "f")

@@ -2,7 +2,7 @@
 
 把 M7A 的能力包装成一组工具：看画面（observe）、点按钮（click / click_grid / press_key / scroll / drag / wait）、
 跳转界面（list_screens / goto_screen）、运行 M7A 任务（list_m7a_tasks / run_m7a_task / stop_m7a_task / get_status）、
-联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / list_todo_for_user）。
+联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）。
 
 - 「最近一次观察」状态：元素编号和格子坐标都针对最近一次观察的结果。
 - 动作类工具执行后自动等画面稳定，再观察一次，把新画面一起返回。
@@ -159,10 +159,11 @@ def _console_python() -> str:
 
 
 def _child_env() -> dict:
-    """子进程环境：去掉只读配置标志和 MCP token，其余原样继承（任务需要 DEEPSEEK_API_KEY 等）。"""
+    """子进程环境：去掉只读配置标志、MCP token 和禁用接管的标志，其余原样继承（任务需要 DEEPSEEK_API_KEY 等）。"""
     env = dict(os.environ)
     env.pop("MARCH7TH_CONFIG_READONLY", None)
     env.pop("M7A_MCP_TOKEN", None)
+    env.pop(llm_config.ENV_TAKEOVER_DISABLE, None)  # 任务进程里仍然保留第一期的接管
     return env
 
 
@@ -382,12 +383,13 @@ class TodoList:
         except OSError:
             return []
         entries: List[dict] = []
-        for line in lines:
+        for index, line in enumerate(lines):
             match = self.ENTRY_RE.match(line)
             if match:
-                entries.append({"done": match.group(1) != " ", "lines": [line]})
+                entries.append({"done": match.group(1) != " ", "lines": [line], "start": index, "end": index})
             elif entries and line.startswith("  "):
                 entries[-1]["lines"].append(line)
+                entries[-1]["end"] = index
         for entry in entries:
             title = entry["lines"][0]
             entry["title"] = re.sub(r"^- \[.\] \S+ \S+ \*\*(.*?)\*\*$", r"\1", title)
@@ -398,6 +400,33 @@ class TodoList:
         pending = [entry for entry in entries if not entry["done"]]
         text = "\n".join("\n".join(entry["lines"]) for entry in pending)
         return len(pending), text
+
+    def resolve(self, item: str, note: str = "", now: Optional[float] = None) -> Tuple[str, List[str], int, str]:
+        """把名称匹配 item 的未处理事项标成已处理（[x]）并追加处理说明和时间。
+
+        先找完全相同的名称，没有再找包含关系（item 包含事项名或事项名包含 item）。
+        返回 (状态, 相关事项名, 未处理条数, 未处理清单文字)；状态：resolved / none / ambiguous。
+        """
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now if now is not None else time.time()))
+        needle = _one_line(item, TODO_ITEM_MAX).replace("**", "").strip()
+        with self._lock:
+            entries = self._read_entries()
+            pending = [entry for entry in entries if not entry["done"]]
+            matches = [entry for entry in pending if entry["title"] == needle]
+            if not matches and needle:
+                matches = [entry for entry in pending if needle in entry["title"] or entry["title"] in needle]
+            if len(matches) != 1:
+                count, text = self.pending_text()
+                return ("none" if not matches else "ambiguous"), [entry["title"] for entry in matches], count, text
+            entry = matches[0]
+            with open(self.path, "r", encoding="utf-8") as file:
+                lines = file.read().splitlines()
+            lines[entry["start"]] = "- [x] " + lines[entry["start"]][len("- [ ] "):]
+            lines.insert(entry["end"] + 1, f"  - 已处理：{stamp}　{_one_line(note, TODO_TEXT_MAX) or '(无说明)'}")
+            with open(self.path, "w", encoding="utf-8", newline="\n") as file:
+                file.write("\n".join(lines) + "\n")
+            count, text = self.pending_text()
+        return "resolved", [entry["title"]], count, text
 
     def add(self, item: str, reason: str, how_to_reach: str, now: Optional[float] = None) -> Tuple[bool, int, str]:
         """追加一条；同名未处理事项已经在清单里时不重复追加。返回 (是否新增, 未处理条数, 未处理清单文字)。"""
@@ -1288,6 +1317,26 @@ class McpTools:
         self._write_record("leave_for_user", args, started, extra={"added": added, "pending": count})
         head = "已记入留给用户的清单。" if added else "这件事已经在清单里（未处理），没有重复记录。"
         return ToolOutput(f"{head}当前未处理 {count} 条：\n{text}\n文件：{self.todo.path}")
+
+    def resolve_todo(self, item, note="") -> ToolOutput:
+        args = {"item": item, "note": note}
+        started = self._clock()
+        if not isinstance(item, str) or not item.strip():
+            return self._invalid("resolve_todo", args, "item（事项名称）不能为空。")
+        try:
+            status, titles, count, text = self.todo.resolve(item, note if isinstance(note, str) else "")
+        except OSError as e:
+            return ToolOutput(f"更新失败：{self._safe(e)}")
+        self._write_record("resolve_todo", args, started, extra={"status": status, "matched": titles, "pending": count})
+        if status == "resolved":
+            listing = f"当前未处理 {count} 条：\n{text}" if count else "当前没有未处理的事项了。"
+            return ToolOutput(f"已把「{titles[0]}」标为已处理。{listing}")
+        if status == "ambiguous":
+            reason = f"「{item}」匹配到多条未处理事项（{'、'.join(titles)}），请用更完整的名称。"
+        else:
+            reason = f"没有名称匹配「{item}」的未处理事项。"
+        listing = f"当前未处理 {count} 条：\n{text}" if count else "当前没有未处理的事项。"
+        return ToolOutput(f"【未执行】{reason}{listing}")
 
     def list_todo_for_user(self) -> ToolOutput:
         count, text = self.todo.pending_text()

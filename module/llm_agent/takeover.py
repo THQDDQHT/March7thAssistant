@@ -352,6 +352,8 @@ def try_takeover(trigger: str, goal: str = ANY_KNOWN, cfg: Optional[llm_config.T
     接管关闭或没有 key 时什么都不做，调用方走原来的流程。
     """
     global _active, _count, _warned_no_key
+    if llm_config.takeover_disabled():
+        return False  # 本进程禁用接管（MCP server）：错误直接交给调用方
     if cfg is None:
         cfg = llm_config.load_config()
     if not cfg.enable:
