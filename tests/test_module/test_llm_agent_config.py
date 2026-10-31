@@ -106,6 +106,7 @@ class TestOldUserConfigGetsDefaults:
         """用户已有的 config.yaml 里没有 llm_takeover_* 时，Config 加载后能拿到默认值，并写回文件。"""
         from module.config.config import Config
         monkeypatch.delenv("MARCH7TH_CONFIG_READONLY", raising=False)
+        monkeypatch.setattr(Config, "_readonly", Config._readonly)  # Config.__init__ 会改这个类属性，让 monkeypatch 负责还原
         version = tmp_path / "version.txt"
         version.write_text("1.0.0", encoding="utf-8")
         user = tmp_path / "config.yaml"
