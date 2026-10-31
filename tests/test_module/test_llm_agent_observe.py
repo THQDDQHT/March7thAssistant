@@ -78,7 +78,7 @@ class TestOrdering:
 
 class TestTable:
     def test_percent_coordinates(self):
-        elements = [ob.Element(1, "关闭", (1824, 54, 1920, 108)), ob.Element(2, "中", (864, 486, 1056, 594))]
+        elements = [ob.Element(1, "关闭", (1810, 60, 1910, 120)), ob.Element(2, "中", (864, 486, 1056, 594))]
         table = ob.format_element_table(elements, (1920, 1080))
         assert table.splitlines() == ["[1] 关闭 @ (97%, 8%)", "[2] 中 @ (50%, 50%)"]
 

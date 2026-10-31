@@ -113,7 +113,8 @@ class TestOldUserConfigGetsDefaults:
         user.write_text("log_level: DEBUG\n", encoding="utf-8")
         monkeypatch.chdir(tmp_path)
 
-        config = Config(str(version), str(EXAMPLE), str(user))
+        config = Config.__new__(Config)  # Config 是单例，绕开元类才能用临时配置文件构造一个新的
+        config.__init__(str(version), str(EXAMPLE), str(user))
 
         assert config.get_value("log_level") == "DEBUG"  # 用户自己的值保留
         assert config.get_value("llm_takeover_enable") is False
