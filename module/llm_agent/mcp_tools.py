@@ -3,7 +3,7 @@
 把 M7A 的能力包装成一组工具：看画面（observe）、点按钮（click / click_grid / press_key / scroll / drag / wait）、
 跳转界面（list_screens / goto_screen）、运行 M7A 任务（list_m7a_tasks / run_m7a_task / stop_m7a_task / get_status）、
 联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）、
-读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）。
+记录和读取进度（record_progress / get_progress）、读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）。
 
 - 「最近一次观察」状态：元素编号和格子坐标都针对最近一次观察的结果。
 - 动作类工具执行后自动等画面稳定，再观察一次，把新画面一起返回。
@@ -11,6 +11,8 @@
 - 护栏：复用第一期的 Guard（按键白名单是扩充版），写在代码里，不靠 prompt。
 - 记录：logs/mcp_agent/<日期>/ 下每次操作类调用一张标注图（操作前的画面）加一个 JSON。
 - 离线模式：用一张固定截图代替实时截图，所有输入都改成空操作，只记录不执行。
+- 多账号：从画面左下角的 UID 认出当前账号（AccountTracker，只读状态、不发输入），
+  「留给用户的事项」和「进度记录」按账号分文件存（todo_for_user-<uid>.md / progress-<uid>.md，没认出来用 unknown）。
 
 每个工具方法返回 ToolOutput(text, image)：image 是标注过的 JPEG 字节；mcp_server.py 负责转成 MCP 的 content 列表。
 InputInterrupted / GameWindowLost（上游后台输入需要用户处理 / 游戏窗口丢失）不会被吞掉，原样向上抛。
@@ -92,9 +94,23 @@ RULE_OFFLINE = "offline_mode"
 RULE_BUSY = "busy"
 RULE_CONFIG = "config_rejected"
 
-TODO_FILE = "todo_for_user.md"
+# 按账号分开存的文件：<前缀>-<uid>.<后缀>；账号没认出来时 uid 用 unknown
+TODO_PREFIX = "todo_for_user"
+PROGRESS_PREFIX = "progress"
+UNKNOWN_ACCOUNT = "unknown"
+ACCOUNTS_FILE = "accounts.json"
+CURRENT_ACCOUNT_FILE = "current_account.json"
 TODO_ITEM_MAX = 100
 TODO_TEXT_MAX = 500
+PROGRESS_TEXT_MAX = 6000
+PROGRESS_CHARS_MIN, PROGRESS_CHARS_MAX = 500, 20000
+# 账号 UID 在画面左下角：中心点横向不超过 20%、纵向不低于 90%
+UID_AREA_X_MAX = 0.20
+UID_AREA_Y_MIN = 0.90
+# 没认出账号时，待办和进度工具抢操作锁（先观察一次）最多等多久（秒）
+ACCOUNT_LOCK_TIMEOUT = 5
+ACCOUNT_UNKNOWN_WARNING = ("警告：还没有在画面左下角确认当前账号，下面按「账号未知」处理（记在 unknown 文件里），可能不属于当前账号；"
+                           "回到能看到左下角 UID 的界面（如主界面）后用 observe 确认账号。")
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 
@@ -353,9 +369,12 @@ class ToolRecorder:
         self._seq = 0
         self._lock = threading.Lock()
 
-    @property
-    def todo_path(self) -> str:
-        return os.path.join(self.base_dir, TODO_FILE)
+    def todo_path_for(self, key: str) -> str:
+        """某个账号的待办文件（key 是 UID 或 unknown）。旧的单文件 todo_for_user.md 不再读写。"""
+        return os.path.join(self.base_dir, f"{TODO_PREFIX}-{key}.md")
+
+    def progress_path_for(self, key: str) -> str:
+        return os.path.join(self.base_dir, f"{PROGRESS_PREFIX}-{key}.md")
 
     def write(self, tool: str, data: dict, image: Optional[bytes] = None) -> Optional[str]:
         try:
@@ -464,6 +483,250 @@ class TodoList:
         return added, count, text
 
 
+class ProgressLog:
+    """某个账号的进度记录（Markdown）：文件头 + 若干条 `## 时间\n内容\n\n`。只追加，读取时按条解析。"""
+
+    ENTRY_RE = re.compile(r"^## (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$", re.M)
+
+    def __init__(self, path: str, header: str):
+        self.path = path
+        self.header = header
+        self._lock = threading.Lock()
+
+    def _read_entries(self) -> List[Tuple[str, str]]:
+        """[(时间, 内容), ...]，按写入顺序（旧的在前）。"""
+        try:
+            with open(self.path, "r", encoding="utf-8") as file:
+                text = file.read()
+        except OSError:
+            return []
+        matches = list(self.ENTRY_RE.finditer(text))
+        entries = []
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            entries.append((match.group(1), text[match.end():end].strip("\n")))
+        return entries
+
+    def add(self, summary: str, now: Optional[float] = None) -> int:
+        """追加一条，返回追加后的总条数。内容里长得像条目标题的行会加个反斜杠，免得被当成新条目。"""
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now if now is not None else time.time()))
+        body = "\n".join(("\\" + line) if self.ENTRY_RE.match(line) else line for line in summary.strip().splitlines())
+        with self._lock:
+            os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+            new_file = not os.path.exists(self.path)
+            with open(self.path, "a", encoding="utf-8", newline="\n") as file:
+                if new_file:
+                    file.write(self.header)
+                file.write(f"## {stamp}\n{body}\n\n")
+            return len(self._read_entries())
+
+    def summary(self) -> Tuple[int, Optional[str]]:
+        """(条数, 最近一条的时间)。"""
+        entries = self._read_entries()
+        return len(entries), (entries[-1][0] if entries else None)
+
+    def tail(self, max_chars: int) -> Tuple[str, int, int]:
+        """从最新往前取记录，总长不超过 max_chars，按时间正序拼成文字。返回 (文字, 取了几条, 总条数)。
+
+        最新的一条自己就超长时，截断它的内容（标题保留）。
+        """
+        entries = self._read_entries()
+        blocks: List[str] = []
+        used = 0
+        for stamp, body in reversed(entries):
+            block = f"## {stamp}\n{body}\n\n"
+            if used + len(block) > max_chars:
+                if not blocks:  # 最新一条就放不下：截断内容
+                    room = max(max_chars - len(f"## {stamp}\n") - len("…（后略）\n\n"), 0)
+                    block = f"## {stamp}\n{body[:room]}…（后略）\n\n"
+                    blocks.append(block)
+                break
+            blocks.append(block)
+            used += len(block)
+        return "".join(reversed(blocks)), len(blocks), len(entries)
+
+
+class AccountTracker:
+    """从观察结果里认出当前登录的游戏账号（只读状态，不发任何输入）。
+
+    - 只认画面左下角（元素中心点 x ≤ 20%、y ≥ 90%）里形如 `UID:111111111` 的文字；
+      别处出现的 UID（好友列表、网页内容）一律不理。
+    - 登记表 <base>/accounts.json：{"<uid>": {"name": "...", "note": "..."}}，文件修改时间变了就重读；
+      不存在或格式错误当作空表。
+    - 当前账号持久化在 <base>/current_account.json；启动时读出来当初始值，标成「上次记录」，直到在画面上重新确认。
+    - 候选 UID 等于当前账号或在登记表里，立即采用；未登记的新 UID 要连续两次观察读到同一个才采用，防 OCR 读错一位。
+      中间读到别的值就重新计数；这一帧左下角没读到 UID 则不动（战斗等界面本来就没有）。
+    """
+
+    UID_RE = re.compile(r"(?<![A-Za-z])UID\s*[:：]?\s*(?<!\d)(\d{9,10})(?!\d)", re.I)
+    SEEN_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+    def __init__(self, base_dir: str, clock: Callable = time.time):
+        self.base_dir = base_dir
+        self._clock = clock
+        self._lock = threading.RLock()
+        self._registry: dict = {}
+        self._registry_sig = None
+        self._uid: Optional[str] = None
+        self._confirmed = False  # 当前 UID 是不是本次运行在画面上确认过的
+        self._pending_uid: Optional[str] = None
+        self._pending_count = 0
+        self.switched_from: Optional[str] = None  # 刚从这个 UID 切走（提示发出后清掉）
+        self._announce = False  # 第一次确认账号（之前未知或只是上次记录）
+        self._load_current()
+
+    # ------------------------------------------------------------ 文件 ----
+
+    @property
+    def registry_path(self) -> str:
+        return os.path.join(self.base_dir, ACCOUNTS_FILE)
+
+    @property
+    def current_path(self) -> str:
+        return os.path.join(self.base_dir, CURRENT_ACCOUNT_FILE)
+
+    def _load_registry(self) -> dict:
+        try:
+            stat = os.stat(self.registry_path)
+        except OSError:
+            self._registry, self._registry_sig = {}, None
+            return self._registry
+        signature = (stat.st_mtime_ns, stat.st_size)
+        if signature == self._registry_sig:
+            return self._registry
+        registry = {}
+        try:
+            with open(self.registry_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            if isinstance(data, dict):
+                for uid, entry in data.items():
+                    name = entry.get("name") if isinstance(entry, dict) else entry
+                    registry[str(uid).strip()] = (str(name).strip() if isinstance(name, str) else "") or "未命名账号"
+        except (OSError, ValueError):
+            registry = {}
+        self._registry, self._registry_sig = registry, signature
+        return registry
+
+    def _load_current(self):
+        try:
+            with open(self.current_path, "r", encoding="utf-8") as file:
+                data = json.load(file)
+            uid = str(data.get("uid", "")).strip() if isinstance(data, dict) else ""
+        except (OSError, ValueError):
+            return
+        if re.fullmatch(r"\d{9,10}", uid):
+            self._uid = uid
+
+    def _save_current(self):
+        data = {"uid": self._uid, "seen_at": time.strftime(self.SEEN_FORMAT, time.localtime(self._clock()))}
+        try:
+            os.makedirs(self.base_dir, exist_ok=True)
+            temp = self.current_path + ".tmp"
+            with open(temp, "w", encoding="utf-8") as file:
+                json.dump(data, file, ensure_ascii=False, indent=2)
+            os.replace(temp, self.current_path)
+        except OSError:
+            pass  # 写不下也不影响工具，下次确认时再写
+
+    # ------------------------------------------------------------ 状态 ----
+
+    @property
+    def uid(self) -> Optional[str]:
+        with self._lock:
+            return self._uid
+
+    @property
+    def confirmed(self) -> bool:
+        with self._lock:
+            return self._uid is not None and self._confirmed
+
+    @property
+    def file_key(self) -> str:
+        """待办和进度文件名里的账号部分：在画面上确认过的 UID，否则 unknown（上次记录也不算数，防止串号）。"""
+        with self._lock:
+            return self._uid if self._uid and self._confirmed else UNKNOWN_ACCOUNT
+
+    def name_of(self, uid: str) -> Optional[str]:
+        with self._lock:
+            return self._load_registry().get(uid)
+
+    def label(self, uid: Optional[str]) -> str:
+        """`账号甲（UID 111111111）` / `未登记账号（UID 123456789）`；uid 为空是 `未知账号`。"""
+        if not uid:
+            return "未知账号"
+        return f"{self.name_of(uid) or '未登记账号'}（UID {uid}）"
+
+    def account_label(self) -> str:
+        """文件归属的账号：确认过的账号名，否则 `未知账号`。"""
+        with self._lock:
+            return self.label(self._uid if self._confirmed else None)
+
+    def describe(self) -> str:
+        with self._lock:
+            if not self._uid:
+                return "未知（还没在画面左下角认到 UID）"
+            name = self.name_of(self._uid) or "未登记账号"
+            if self._confirmed:
+                return f"{name}（UID {self._uid}）"
+            return f"{name}（UID {self._uid}，上次记录，本次还没在画面上确认）"
+
+    def take_notice(self) -> Optional[str]:
+        """取走（并清掉）要放在下一次观察文字开头的账号提示：刚切换账号，或第一次确认账号。"""
+        with self._lock:
+            if self.switched_from:
+                old = self.switched_from
+                self.switched_from, self._announce = None, False
+                return (f"注意：当前账号已从「{self.label(old)}」切换为「{self.label(self._uid)}」，"
+                        f"之后的待办和进度都记在新账号名下。")
+            if self._announce:
+                self._announce = False
+                return f"当前账号：{self.describe()}"
+            return None
+
+    # ------------------------------------------------------------ 识别 ----
+
+    def _candidates(self, observation) -> List[str]:
+        width, height = observation.size
+        if not width or not height:
+            return []
+        found: List[str] = []
+        for element in observation.elements:
+            center_x, center_y = element.center
+            if center_x > width * UID_AREA_X_MAX or center_y < height * UID_AREA_Y_MIN:
+                continue
+            for match in self.UID_RE.finditer(element.text or ""):
+                if match.group(1) not in found:
+                    found.append(match.group(1))
+        return found
+
+    def update(self, observation) -> None:
+        """用一次观察更新当前账号。"""
+        candidates = self._candidates(observation)
+        if not candidates:
+            return
+        with self._lock:
+            registry = self._load_registry()
+            uid = next((item for item in candidates if item == self._uid or item in registry), candidates[0])
+            if uid == self._uid or uid in registry:
+                self._adopt(uid)
+                return
+            if uid == self._pending_uid:
+                self._pending_count += 1
+            else:
+                self._pending_uid, self._pending_count = uid, 1
+            if self._pending_count >= 2:
+                self._adopt(uid)
+
+    def _adopt(self, uid: str):
+        if self._uid and self._confirmed and uid != self._uid:
+            self.switched_from = self._uid
+        elif not self._confirmed:
+            self._announce = True
+        self._uid, self._confirmed = uid, True
+        self._pending_uid, self._pending_count = None, 0
+        self._save_current()
+
+
 # ---------------------------------------------------------------- 工具集 ----
 
 class McpTools:
@@ -516,7 +779,10 @@ class McpTools:
             self._executor = executor
             base = record_base or RECORD_BASE
         self.recorder = ToolRecorder(base if os.path.isabs(base) else os.path.join(root, base))
-        self.todo = TodoList(self.recorder.todo_path)
+        self.tracker = AccountTracker(self.recorder.base_dir)
+        self._account_files_lock = threading.Lock()
+        self._todo_lists: dict = {}
+        self._progress_logs: dict = {}
 
         # 最近一次观察
         self._last: Optional[Observation] = None
@@ -529,6 +795,67 @@ class McpTools:
         self._task_run_id: Optional[str] = None
         self._task_list_cache: Optional[List[Tuple[str, str]]] = None
         self._fetch_cache: dict = {}
+
+    # ------------------------------------------------------------ 按账号的文件 ----
+
+    def _todo_for(self, key: str) -> TodoList:
+        """某个账号的待办清单（按路径缓存，同一个文件共用一把锁）。"""
+        path = self.recorder.todo_path_for(key)
+        with self._account_files_lock:
+            if path not in self._todo_lists:
+                self._todo_lists[path] = TodoList(path)
+            return self._todo_lists[path]
+
+    def _progress_for(self, key: str) -> ProgressLog:
+        path = self.recorder.progress_path_for(key)
+        with self._account_files_lock:
+            if path not in self._progress_logs:
+                if key == UNKNOWN_ACCOUNT:
+                    header = "# 未知账号 的进度记录（UID 未知）\n\n"
+                else:
+                    header = f"# {self.tracker.name_of(key) or '未登记账号'} 的进度记录（UID {key}）\n\n"
+                self._progress_logs[path] = ProgressLog(path, header)
+            return self._progress_logs[path]
+
+    @property
+    def todo(self) -> TodoList:
+        """当前账号（没确认就是 unknown）的待办清单。"""
+        return self._todo_for(self.tracker.file_key)
+
+    @property
+    def progress(self) -> ProgressLog:
+        return self._progress_for(self.tracker.file_key)
+
+    def _confirm_account(self):
+        """待办和进度要按账号分开存。账号还没在画面上确认时，在安全的情况下先观察一次来认账号。
+
+        条件：游戏窗口在（离线模式用固定截图，也可以）、没有 M7A 任务在跑、抢得到操作锁（等 5 秒）。
+        走 _take_observation，所以前台切换、互斥和账号更新都和 observe 工具一致；失败不报错，账号照旧未知。
+        """
+        if self.tracker.confirmed:
+            return
+        try:
+            if not self.offline and not self.game.is_running():
+                return
+            if self._active_task():
+                return
+            with self._exclusive(timeout=ACCOUNT_LOCK_TIMEOUT):
+                if self.tracker.confirmed or self._active_task() or self._ensure_front(False):
+                    return
+                self._take_observation(False)
+        except ToolBusy:
+            return
+        except Exception as e:
+            reraise_passthrough(e)
+            self._warn(f"为认账号做的观察失败：{self._safe(e)}")
+
+    def _account_header(self) -> Tuple[str, str]:
+        """先确认账号，返回 (文件 key, 输出开头的几行：账号行 + 未确认时的警告)。"""
+        self._confirm_account()
+        head = f"账号：{self.tracker.describe()}"
+        if not self.tracker.confirmed:
+            head += "\n" + ACCOUNT_UNKNOWN_WARNING
+        return self.tracker.file_key, head
 
     # ------------------------------------------------------------ 依赖 ----
 
@@ -707,6 +1034,10 @@ class McpTools:
 
     def _take_observation(self, grid: bool = False) -> Observation:
         observation = self._observe(grid)
+        try:
+            self.tracker.update(observation)
+        except Exception as e:  # 认账号失败不能影响观察
+            self._warn(f"识别账号出错：{self._safe(e)}")
         self._last_screen = self._detect_screen()
         self._last = observation
         self._last_seq += 1
@@ -725,6 +1056,9 @@ class McpTools:
             picture = "标注图（元素框上的编号就是 click 的 id）"
         lines = [head, f"图片：{picture}；输入模式：{self._input_mode()}", "元素表（[编号] 文字 @ (横%, 纵%)）：",
                  observation.table_text()]
+        notice = self.tracker.take_notice()  # 平时不加账号行（省 token），只在切换或第一次认出账号时提醒
+        if notice:
+            lines.insert(0, notice)
         hints = []
         word = self.guard.screen_danger_word(observation.all_texts())
         if word:
@@ -1312,8 +1646,12 @@ class McpTools:
                              f"（退出码 {record.get('exit_code')}）  开始 {record.get('started_at')}")
         else:
             lines.append("最近运行：没有记录")
+        lines.append(f"当前账号：{self.tracker.describe()}")
         count, _ = self.todo.pending_text()
         lines.append(f"留给用户的未处理事项：{count} 条")
+        total, last = self.progress.summary()
+        lines.append(f"本账号进度记录：{total} 条，最近一条 {last}（用 get_progress 查看）" if total
+                     else "本账号进度记录：0 条（用 get_progress 查看）")
         return ToolOutput("\n".join(lines))
 
     # ------------------------------------------------------------ 联网 ----
@@ -1398,10 +1736,12 @@ class McpTools:
         if not isinstance(reason, str) or not reason.strip():
             return self._invalid("leave_for_user", args, "reason（为什么留给用户）不能为空。")
         how = how_to_reach if isinstance(how_to_reach, str) else ""
+        key, head_lines = self._account_header()
+        todo = self._todo_for(key)
         try:
-            added, count, text = self.todo.add(item, reason, how)
+            added, count, text = todo.add(item, reason, how)
         except OSError as e:
-            return ToolOutput(f"记录失败：{self._safe(e)}")
+            return ToolOutput(f"{head_lines}\n记录失败：{self._safe(e)}")
         if added:
             image = None
             if self._last is not None:
@@ -1411,31 +1751,33 @@ class McpTools:
                     image = None
             screen = self._last_screen[1] or "未知"
             self._send_notification(
-                f"【M7A agent 留给你】{_one_line(item, TODO_ITEM_MAX)}\n原因：{_one_line(reason, TODO_TEXT_MAX)}\n"
+                f"【M7A agent 留给你】{_one_line(item, TODO_ITEM_MAX)}\n账号：{self.tracker.describe()}\n原因：{_one_line(reason, TODO_TEXT_MAX)}\n"
                 f"进入方式：{_one_line(how, TODO_TEXT_MAX) or '(未说明)'}\n当前界面：{screen}", image)
-        self._write_record("leave_for_user", args, started, extra={"added": added, "pending": count})
+        self._write_record("leave_for_user", args, started, extra={"added": added, "pending": count, "account": key})
         head = "已记入留给用户的清单。" if added else "这件事已经在清单里（未处理），没有重复记录。"
-        return ToolOutput(f"{head}当前未处理 {count} 条：\n{text}\n文件：{self.todo.path}")
+        return ToolOutput(f"{head_lines}\n{head}当前未处理 {count} 条：\n{text}\n文件：{todo.path}")
 
     def resolve_todo(self, item, note="") -> ToolOutput:
         args = {"item": item, "note": note}
         started = self._clock()
         if not isinstance(item, str) or not item.strip():
             return self._invalid("resolve_todo", args, "item（事项名称）不能为空。")
+        key, head_lines = self._account_header()
         try:
-            status, titles, count, text = self.todo.resolve(item, note if isinstance(note, str) else "")
+            status, titles, count, text = self._todo_for(key).resolve(item, note if isinstance(note, str) else "")
         except OSError as e:
-            return ToolOutput(f"更新失败：{self._safe(e)}")
-        self._write_record("resolve_todo", args, started, extra={"status": status, "matched": titles, "pending": count})
+            return ToolOutput(f"{head_lines}\n更新失败：{self._safe(e)}")
+        self._write_record("resolve_todo", args, started,
+                           extra={"status": status, "matched": titles, "pending": count, "account": key})
         if status == "resolved":
             listing = f"当前未处理 {count} 条：\n{text}" if count else "当前没有未处理的事项了。"
-            return ToolOutput(f"已把「{titles[0]}」标为已处理。{listing}")
+            return ToolOutput(f"{head_lines}\n已把「{titles[0]}」标为已处理。{listing}")
         if status == "ambiguous":
             reason = f"「{item}」匹配到多条未处理事项（{'、'.join(titles)}），请用更完整的名称。"
         else:
             reason = f"没有名称匹配「{item}」的未处理事项。"
         listing = f"当前未处理 {count} 条：\n{text}" if count else "当前没有未处理的事项。"
-        return ToolOutput(f"【未执行】{reason}{listing}")
+        return ToolOutput(f"{head_lines}\n【未执行】{reason}{listing}")
 
     # ------------------------------------------------------------ 配置 ----
 
@@ -1483,7 +1825,49 @@ class McpTools:
         return ToolOutput(text + ("（离线模式：写的是临时副本，真实 config.yaml 没有改动）" if self.offline else ""))
 
     def list_todo_for_user(self) -> ToolOutput:
-        count, text = self.todo.pending_text()
+        key, head_lines = self._account_header()
+        todo = self._todo_for(key)
+        count, text = todo.pending_text()
         if not count:
-            return ToolOutput("留给用户的清单里没有未处理的事项。")
-        return ToolOutput(f"留给用户、还没处理的事项共 {count} 条：\n{text}\n文件：{self.todo.path}")
+            return ToolOutput(f"{head_lines}\n留给用户的清单里没有未处理的事项。")
+        return ToolOutput(f"{head_lines}\n留给用户、还没处理的事项共 {count} 条：\n{text}\n文件：{todo.path}")
+
+    # ------------------------------------------------------------ 进度记录 ----
+
+    def record_progress(self, summary) -> ToolOutput:
+        args = {"summary": _one_line(summary, 200) if isinstance(summary, str) else summary}
+        started = self._clock()
+        if not isinstance(summary, str) or not summary.strip():
+            return self._invalid("record_progress", args, "summary（这一轮做了什么、还剩什么）不能为空。")
+        if len(summary.strip()) > PROGRESS_TEXT_MAX:
+            return self._invalid("record_progress", args,
+                                 f"summary 最多 {PROGRESS_TEXT_MAX} 字，现在 {len(summary.strip())} 字，请精简后重写。")
+        self._confirm_account()
+        key = self.tracker.file_key
+        label = self.tracker.account_label()
+        try:
+            total = self._progress_for(key).add(summary)
+        except OSError as e:
+            return ToolOutput(f"记录失败：{self._safe(e)}")
+        self._write_record("record_progress", args, started, extra={"account": key, "total": total})
+        text = f"已记到 {label} 的进度记录（共 {total} 条）"
+        if not self.tracker.confirmed:
+            text += f"\n账号：{self.tracker.describe()}\n{ACCOUNT_UNKNOWN_WARNING}"
+        return ToolOutput(text)
+
+    def get_progress(self, max_chars=4000) -> ToolOutput:
+        size = _as_int(max_chars)
+        if size is None:
+            return ToolOutput("【未执行】max_chars 必须是整数。")
+        size = min(max(size, PROGRESS_CHARS_MIN), PROGRESS_CHARS_MAX)
+        key, head_lines = self._account_header()
+        log = self._progress_for(key)
+        total, _ = log.summary()
+        if not total:
+            return ToolOutput(f"{head_lines}\n这个账号还没有进度记录。")
+        head = f"{head_lines}\n以下是最近的进度记录（按时间从旧到新，最后一条最新）：\n"
+        tail_note = "\n（更早的记录没有显示，要看更多就调大 max_chars）"
+        text, shown, _ = log.tail(max(size - len(head) - len(tail_note), 0))
+        # 总长不超过 max_chars：开头、正文、省略说明三部分一起算
+        out = head + text.rstrip("\n") + (tail_note if shown < total else "")
+        return ToolOutput(out)

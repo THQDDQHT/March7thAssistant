@@ -6,6 +6,7 @@
 import glob
 import json
 import os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -922,7 +923,7 @@ class TestLeaveForUser:
         env.tools.observe()
         out = env.tools.leave_for_user("「彩蛋」小游戏活动", "需要即时反应", "主界面 → 活动 → 彩蛋")
         assert "已记入" in out.text and "当前未处理 1 条" in out.text
-        path = os.path.join(env.tmp_path, "rec", "todo_for_user.md")
+        path = os.path.join(env.tmp_path, "rec", "todo_for_user-unknown.md")
         text = open(path, encoding="utf-8").read()
         assert "- [ ] " in text and "**「彩蛋」小游戏活动**" in text
         assert "原因：需要即时反应" in text and "进入方式：主界面 → 活动 → 彩蛋" in text
@@ -941,7 +942,7 @@ class TestLeaveForUser:
     def test_done_items_are_not_listed(self, env):
         env.tools.leave_for_user("活动 A", "太难")
         env.tools.leave_for_user("活动 B", "解谜")
-        path = os.path.join(env.tmp_path, "rec", "todo_for_user.md")
+        path = os.path.join(env.tmp_path, "rec", "todo_for_user-unknown.md")
         text = open(path, encoding="utf-8").read().replace("- [ ] ", "- [x] ", 1)
         open(path, "w", encoding="utf-8").write(text)
         listed = env.tools.list_todo_for_user().text
@@ -1082,7 +1083,7 @@ class TestGuardAllowedKeysParameter:
 
 class TestResolveTodo:
     def _path(self, env):
-        return os.path.join(env.tmp_path, "rec", "todo_for_user.md")
+        return os.path.join(env.tmp_path, "rec", "todo_for_user-unknown.md")
 
     def test_exact_match_marks_done_with_note_and_time(self, env):
         env.tools.leave_for_user("彩蛋小游戏", "即时操作")
@@ -1148,3 +1149,428 @@ class TestResolveTodo:
         env.tools.leave_for_user("活动 A", "x")
         env.runs.active = {"task": "daily", "run_id": "r1"}
         assert "已把「活动 A」标为已处理" in env.tools.resolve_todo("活动 A").text
+
+
+# ---------------------------------------------------------------- 多账号 ----
+
+UID_A, UID_B, UID_NEW = "111111111", "222222222", "333333333"
+
+
+def elem_at(index, text, fx, fy, size=(1920, 1080)):
+    """中心点在 (fx, fy)（相对截图的比例）的元素。"""
+    cx, cy = int(size[0] * fx), int(size[1] * fy)
+    return Element(index, text, (cx - 60, cy - 10, cx + 60, cy + 10))
+
+
+def uid_obs(text, fx=0.05, fy=0.98, extra=("关闭",)):
+    """带一个 UID 文字元素（默认在左下角）的观察；text 为 None 表示画面上没有 UID。"""
+    elements = [Element(i + 1, name, (800, 100 + i * 100, 1000, 150 + i * 100)) for i, name in enumerate(extra)]
+    if text is not None:
+        elements.append(elem_at(len(elements) + 1, text, fx, fy))
+    return Observation(image=Image.new("RGB", (1920, 1080), (30, 30, 30)), elements=elements,
+                       screenshot_pos=(0, 0, 1920, 1080), scale=1.0)
+
+
+def write_registry(base, data):
+    os.makedirs(base, exist_ok=True)
+    with open(os.path.join(base, "accounts.json"), "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False)
+
+
+def switch_to(env, uid):
+    """让之后的观察在左下角显示 uid，并观察一次。"""
+    env.tools._observer = lambda grid: uid_obs(f"UID:{uid}")
+    return env.tools.observe()
+
+
+class TestAccountTracker:
+    @pytest.fixture
+    def base(self, tmp_path):
+        return str(tmp_path / "rec")
+
+    def test_reads_uid_from_bottom_left(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲", "note": ""}})
+        tracker = mt.AccountTracker(base)
+        assert tracker.describe() == "未知（还没在画面左下角认到 UID）" and tracker.file_key == "unknown"
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        assert tracker.describe() == f"账号甲（UID {UID_A}）" and tracker.confirmed and tracker.file_key == UID_A
+
+    @pytest.mark.parametrize("fx,fy", [(0.95, 0.05), (0.5, 0.5), (0.05, 0.5), (0.5, 0.98), (0.95, 0.98), (0.05, 0.85)])
+    def test_same_text_elsewhere_is_ignored(self, base, fx, fy):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_A}", fx, fy))
+        assert tracker.uid is None and not tracker.confirmed
+
+    @pytest.mark.parametrize("text", [f"UID:{UID_A}", f"UID{UID_A}", f"UID {UID_A}", f"UID：{UID_A}", f"UID: {UID_A}"])
+    def test_ocr_spellings(self, base, text):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(text))
+        assert tracker.uid == UID_A
+
+    @pytest.mark.parametrize("text", ["UID:12345", "UID:12345678901", "ID:111111111", "111111111", "GUID 111111111"])
+    def test_non_uid_text_is_ignored(self, base, text):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(text))
+        assert tracker.uid is None
+
+    def test_unregistered_needs_two_consecutive_observations(self, base):
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.uid is None
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.describe() == f"未登记账号（UID {UID_NEW}）"
+
+    def test_different_value_in_between_restarts_the_count(self, base):
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        tracker.update(uid_obs("UID:333333338"))  # OCR 读错一位
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.uid is None
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.uid == UID_NEW
+
+    def test_registered_uid_in_between_also_restarts_the_count(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.uid == UID_A
+
+    def test_observation_without_uid_keeps_state(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        tracker.update(uid_obs(None))
+        assert tracker.uid == UID_A and tracker.confirmed
+
+    def test_switch_notice_appears_once(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}, UID_B: {"name": "账号乙"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        assert tracker.switched_from is None
+        assert tracker.take_notice() == f"当前账号：账号甲（UID {UID_A}）"  # 第一次确认
+        assert tracker.take_notice() is None
+        tracker.update(uid_obs(f"UID:{UID_B}"))
+        assert tracker.switched_from == UID_A
+        assert tracker.take_notice() == (f"注意：当前账号已从「账号甲（UID {UID_A}）」切换为「账号乙（UID {UID_B}）」，"
+                                         f"之后的待办和进度都记在新账号名下。")
+        assert tracker.take_notice() is None and tracker.switched_from is None
+
+    def test_switch_to_unregistered_account_needs_two_and_then_notifies(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        tracker.take_notice()
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert tracker.uid == UID_A and tracker.take_notice() is None
+        tracker.update(uid_obs(f"UID:{UID_NEW}"))
+        assert "切换为「未登记账号（UID 333333333）」" in tracker.take_notice()
+
+    def test_current_account_file_is_written_on_confirmation(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base, clock=lambda: 1793494800.0)
+        assert not os.path.exists(os.path.join(base, "current_account.json"))
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        data = json.load(open(os.path.join(base, "current_account.json"), encoding="utf-8"))
+        assert data["uid"] == UID_A
+        assert data["seen_at"] == mt.time.strftime("%Y-%m-%d %H:%M:%S", mt.time.localtime(1793494800.0))
+
+    def test_last_record_is_loaded_and_described_until_confirmed(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        with open(os.path.join(base, "current_account.json"), "w", encoding="utf-8") as file:
+            json.dump({"uid": UID_A, "seen_at": "2026-11-01 09:00:00"}, file)
+        tracker = mt.AccountTracker(base)
+        assert tracker.describe() == f"账号甲（UID {UID_A}，上次记录，本次还没在画面上确认）"
+        assert not tracker.confirmed and tracker.file_key == "unknown"  # 只是上次记录，不拿来决定文件
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        assert tracker.describe() == f"账号甲（UID {UID_A}）" and tracker.confirmed
+        assert tracker.switched_from is None  # 上次记录 → 确认同一个号，不算切换
+
+    def test_last_record_differs_from_screen_is_not_a_switch_notice(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}, UID_B: {"name": "账号乙"}})
+        with open(os.path.join(base, "current_account.json"), "w", encoding="utf-8") as file:
+            json.dump({"uid": UID_A, "seen_at": "2026-11-01 09:00:00"}, file)
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_B}"))
+        assert tracker.uid == UID_B and tracker.switched_from is None
+        assert tracker.take_notice() == f"当前账号：账号乙（UID {UID_B}）"
+
+    @pytest.mark.parametrize("content", ["不是 json", "[]", '{"uid": 5}', '{"uid": "abc"}', ""])
+    def test_bad_current_account_file_is_ignored(self, base, content):
+        os.makedirs(base)
+        with open(os.path.join(base, "current_account.json"), "w", encoding="utf-8") as file:
+            file.write(content)
+        assert mt.AccountTracker(base).uid is None
+
+    def test_registry_is_reread_when_file_changes(self, base):
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        tracker = mt.AccountTracker(base)
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        assert tracker.describe().startswith("账号甲")
+        write_registry(base, {UID_A: {"name": "新名字", "note": "改过"}})
+        path = os.path.join(base, "accounts.json")
+        stat = os.stat(path)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+        assert tracker.describe().startswith("新名字")
+
+    def test_missing_or_broken_registry_is_empty_and_recovers(self, base):
+        tracker = mt.AccountTracker(base)
+        assert tracker.name_of(UID_A) is None
+        os.makedirs(base, exist_ok=True)
+        path = os.path.join(base, "accounts.json")
+        open(path, "w", encoding="utf-8").write("{坏的")
+        assert tracker.name_of(UID_A) is None
+        tracker.update(uid_obs(f"UID:{UID_A}"))
+        assert tracker.uid is None  # 坏登记表里没有 → 仍要两次
+        write_registry(base, {UID_A: {"name": "账号甲"}})
+        stat = os.stat(path)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 5_000_000_000))
+        assert tracker.name_of(UID_A) == "账号甲"
+
+
+class TestAccountInObservation:
+    @pytest.fixture
+    def acc(self, tmp_path):
+        env = Env(tmp_path)
+        write_registry(os.path.join(env.tmp_path, "rec"), {UID_A: {"name": "账号甲"}, UID_B: {"name": "账号乙"}})
+        return env
+
+    def test_no_account_line_when_nothing_changes(self, acc):
+        assert "账号" not in acc.tools.observe().text  # 画面上没有 UID：不加账号行
+        first = switch_to(acc, UID_A).text
+        assert first.splitlines()[0] == f"当前账号：账号甲（UID {UID_A}）"
+        again = acc.tools.observe().text
+        assert "账号" not in again and again.startswith("观察 #")
+
+    def test_switch_line_is_first_line_and_only_once(self, acc):
+        switch_to(acc, UID_A)
+        text = switch_to(acc, UID_B).text
+        assert text.splitlines()[0] == (f"注意：当前账号已从「账号甲（UID {UID_A}）」切换为「账号乙（UID {UID_B}）」，"
+                                        f"之后的待办和进度都记在新账号名下。")
+        assert "注意：当前账号已从" not in acc.tools.observe().text
+
+    def test_action_reobservation_carries_notice(self, acc):
+        switch_to(acc, UID_A)
+        acc.tools._observer = lambda grid: uid_obs(f"UID:{UID_B}")
+        out = acc.tools.click(1)
+        assert "切换为「账号乙" in out.text
+
+    def test_tracker_error_does_not_break_observation(self, acc):
+        acc.tools.tracker.update = lambda observation: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert acc.tools.observe().image
+
+
+class TestTodoPerAccount:
+    @pytest.fixture
+    def acc(self, tmp_path):
+        env = Env(tmp_path)
+        write_registry(os.path.join(env.tmp_path, "rec"), {UID_A: {"name": "账号甲"}, UID_B: {"name": "账号乙"}})
+        return env
+
+    def _file(self, env, key):
+        return os.path.join(env.tmp_path, "rec", f"todo_for_user-{key}.md")
+
+    def test_other_account_does_not_see_the_todo(self, acc):
+        switch_to(acc, UID_A)
+        out = acc.tools.leave_for_user("活动甲", "太难", "主界面 → 活动")
+        assert out.text.splitlines()[0] == f"账号：账号甲（UID {UID_A}）"
+        assert "已记入" in out.text and os.path.exists(self._file(acc, UID_A))
+        switch_to(acc, UID_B)
+        listed = acc.tools.list_todo_for_user().text
+        assert listed.splitlines()[0] == f"账号：账号乙（UID {UID_B}）" and "活动甲" not in listed
+        assert "没有未处理" in listed
+        acc.tools.leave_for_user("活动乙", "解谜")
+        assert "活动乙" in open(self._file(acc, UID_B), encoding="utf-8").read()
+        assert "活动乙" not in open(self._file(acc, UID_A), encoding="utf-8").read()
+        switch_to(acc, UID_A)
+        listed = acc.tools.list_todo_for_user().text
+        assert "活动甲" in listed and "活动乙" not in listed and f"todo_for_user-{UID_A}.md" in listed
+
+    def test_resolve_only_looks_in_current_account_file(self, acc):
+        switch_to(acc, UID_A)
+        acc.tools.leave_for_user("活动甲", "x")
+        switch_to(acc, UID_B)
+        out = acc.tools.resolve_todo("活动甲")
+        assert out.text.splitlines()[0] == f"账号：账号乙（UID {UID_B}）" and "没有名称匹配" in out.text
+        switch_to(acc, UID_A)
+        out = acc.tools.resolve_todo("活动甲", "做完了")
+        assert out.text.splitlines()[0] == f"账号：账号甲（UID {UID_A}）" and "已把「活动甲」标为已处理" in out.text
+        assert "- [x] " in open(self._file(acc, UID_A), encoding="utf-8").read()
+
+    def test_notification_names_the_account(self, acc):
+        switch_to(acc, UID_A)
+        acc.tools.leave_for_user("活动甲", "太难")
+        assert f"账号：账号甲（UID {UID_A}）" in acc.notifications[0][0]
+
+    def test_old_single_file_is_untouched_and_unread(self, acc):
+        old = os.path.join(acc.tmp_path, "rec", "todo_for_user.md")
+        os.makedirs(os.path.dirname(old), exist_ok=True)
+        content = "# 旧文件\n\n- [ ] 2026-10-31 10:00:00 **旧事项**\n  - 原因：x\n"
+        open(old, "w", encoding="utf-8").write(content)
+        switch_to(acc, UID_A)
+        assert "旧事项" not in acc.tools.list_todo_for_user().text
+        acc.tools.leave_for_user("新事项", "y")
+        acc.tools.resolve_todo("旧事项")
+        assert open(old, encoding="utf-8").read() == content
+
+    def test_unknown_account_uses_unknown_file_with_warning(self, tmp_path):
+        env = Env(tmp_path)  # 画面上没有 UID
+        out = env.tools.leave_for_user("活动", "太难")
+        lines = out.text.splitlines()
+        assert lines[0] == "账号：未知（还没在画面左下角认到 UID）" and lines[1].startswith("警告：")
+        assert os.path.exists(self._file(env, "unknown")) and "已记入" in out.text
+        assert env.observe_calls == [False]  # 先观察了一次想认账号，还是没认出来
+        listed = env.tools.list_todo_for_user().text
+        assert listed.splitlines()[0].startswith("账号：未知") and "警告：" in listed and "活动" in listed
+        resolved = env.tools.resolve_todo("活动", "好了").text
+        assert "警告：" in resolved and "已把「活动」标为已处理" in resolved
+
+    def test_unconfirmed_last_record_also_goes_to_unknown(self, tmp_path):
+        env = Env(tmp_path)
+        base = os.path.join(env.tmp_path, "rec")
+        os.makedirs(base)
+        json.dump({"uid": UID_A, "seen_at": "2026-11-01 09:00:00"}, open(os.path.join(base, "current_account.json"), "w"))
+        env.tools = mt.McpTools(root=env.tmp_path, record_base=base, auto=env.auto, screen=env.screen, game=env.game,
+                                observer=lambda grid: make_obs(), guard=gd.Guard((), mt.MCP_ALLOWED_KEYS), runs=env.runs,
+                                config_get=lambda key, default=None: env.config.get(key, default),
+                                notify=lambda content, image: None, notify_runner=lambda fn: fn(), sleep=lambda s: None,
+                                settle_seconds=0)
+        out = env.tools.leave_for_user("活动", "太难")
+        assert "上次记录，本次还没在画面上确认" in out.text.splitlines()[0] and "警告：" in out.text
+        assert os.path.exists(self._file(env, "unknown")) and not os.path.exists(self._file(env, UID_A))
+
+    def test_unknown_account_observes_first_and_picks_up_account(self, acc):
+        acc.tools._observer = lambda grid: acc.observe_calls.append(grid) or uid_obs(f"UID:{UID_A}")
+        out = acc.tools.leave_for_user("活动甲", "太难")
+        assert acc.observe_calls == [False]
+        assert out.text.splitlines()[0] == f"账号：账号甲（UID {UID_A}）" and "警告" not in out.text
+        assert os.path.exists(self._file(acc, UID_A)) and not os.path.exists(self._file(acc, "unknown"))
+        # 已确认后不再为认账号而观察
+        acc.tools.list_todo_for_user()
+        assert acc.observe_calls == [False]
+        # 观察时顺带得到的「第一次确认」提示留给下一次 observe 带出
+        assert acc.tools.observe().text.splitlines()[0] == f"当前账号：账号甲（UID {UID_A}）"
+
+    def test_no_observation_when_game_missing_or_task_running_or_busy(self, tmp_path, monkeypatch):
+        env = Env(tmp_path)
+        env.game.running = False
+        env.tools.list_todo_for_user()
+        assert env.observe_calls == []
+        env.game.running = True
+        env.runs.active = {"task": "daily", "run_id": "r1"}
+        assert "账号：未知" in env.tools.list_todo_for_user().text and env.observe_calls == []
+        env.runs.active = None
+        assert env.tools._lock.acquire(timeout=1)
+        try:
+            monkeypatch.setattr(mt, "ACCOUNT_LOCK_TIMEOUT", 0.05)
+            assert "账号：未知" in env.tools.list_todo_for_user().text
+        finally:
+            env.tools._lock.release()
+        assert env.observe_calls == []
+
+    def test_observation_for_account_handles_foreground_like_observe(self, tmp_path):
+        env = Env(tmp_path / "a", front=False)  # 后台截图（默认）：不抢焦点
+        env.tools.list_todo_for_user()
+        assert env.game.bring_calls == 0 and env.observe_calls == [False]
+        env = Env(tmp_path / "b", front=False, config={"use_background_screenshot": False})
+        env.tools.list_todo_for_user()
+        assert env.game.bring_calls == 1 and env.observe_calls == [False]
+        env = Env(tmp_path / "c", front=False, config={"use_background_screenshot": False})
+        env.game.can_front = False  # 切不到前台：不观察，账号照旧未知
+        assert "账号：未知" in env.tools.list_todo_for_user().text and env.observe_calls == []
+
+
+class TestProgress:
+    @pytest.fixture
+    def acc(self, tmp_path):
+        env = Env(tmp_path)
+        write_registry(os.path.join(env.tmp_path, "rec"), {UID_A: {"name": "账号甲"}, UID_B: {"name": "账号乙"}})
+        switch_to(env, UID_A)
+        return env
+
+    def _file(self, env, key):
+        return os.path.join(env.tmp_path, "rec", f"progress-{key}.md")
+
+    def test_record_appends_with_header_and_format(self, acc):
+        out = acc.tools.record_progress("日常做完了，还剩逐光捡金")
+        assert out.text == "已记到 账号甲（UID 111111111） 的进度记录（共 1 条）"
+        out = acc.tools.record_progress("第二条\n多行内容")
+        assert "（共 2 条）" in out.text
+        text = open(self._file(acc, UID_A), encoding="utf-8").read()
+        assert text.startswith(f"# 账号甲 的进度记录（UID {UID_A}）\n\n## ")
+        assert re.search(r"## \d{4}-\d\d-\d\d \d\d:\d\d:\d\d\n日常做完了，还剩逐光捡金\n\n## ", text)
+        assert text.endswith("第二条\n多行内容\n\n")
+
+    def test_accounts_have_separate_progress(self, acc):
+        acc.tools.record_progress("甲的进度")
+        switch_to(acc, UID_B)
+        assert "还没有进度记录" in acc.tools.get_progress().text
+        acc.tools.record_progress("乙的进度")
+        text = acc.tools.get_progress().text
+        assert "乙的进度" in text and "甲的进度" not in text and text.splitlines()[0] == f"账号：账号乙（UID {UID_B}）"
+
+    def test_get_progress_returns_latest_entries_in_order_within_max_chars(self, acc):
+        for index in range(1, 8):
+            acc.tools.record_progress(f"第{index}轮：" + "做" * 200)
+        text = acc.tools.get_progress(max_chars=700).text
+        assert len(text) <= 700
+        assert "第7轮" in text and "第6轮" in text and "第1轮" not in text
+        assert text.index("第6轮") < text.index("第7轮")  # 时间正序
+        assert "更早的记录没有显示" in text
+        everything = acc.tools.get_progress(max_chars=20000).text
+        assert all(f"第{index}轮" in everything for index in range(1, 8)) and "更早的记录没有显示" not in everything
+
+    def test_get_progress_truncates_one_huge_entry(self, acc):
+        acc.tools.record_progress("很长" * 2500)
+        text = acc.tools.get_progress(max_chars=500).text
+        assert len(text) <= 500 and "后略" in text
+
+    def test_get_progress_empty_and_bad_argument(self, acc):
+        out = acc.tools.get_progress().text
+        assert out.splitlines()[0] == f"账号：账号甲（UID {UID_A}）" and "这个账号还没有进度记录" in out
+        assert "max_chars 必须是整数" in acc.tools.get_progress("abc").text
+        acc.tools.record_progress("第一条")
+        assert "第一条" in acc.tools.get_progress(1).text  # max_chars 下限 500
+
+    def test_record_rejects_empty_and_too_long(self, acc):
+        for bad in ("", "   \n", None, 123):
+            assert "【未执行】" in acc.tools.record_progress(bad).text
+        out = acc.tools.record_progress("长" * 6001)
+        assert "【未执行】" in out.text and "6000" in out.text
+        assert not os.path.exists(self._file(acc, UID_A))
+        assert "（共 1 条）" in acc.tools.record_progress("长" * 6000).text
+
+    def test_entry_like_lines_cannot_forge_entries(self, acc):
+        acc.tools.record_progress("正文\n## 2026-01-01 00:00:00\n伪造")
+        assert "（共 2 条）" in acc.tools.record_progress("再来一条").text
+
+    def test_unknown_account_goes_to_unknown_file_with_warning(self, tmp_path):
+        env = Env(tmp_path)
+        out = env.tools.record_progress("没认出账号时的进度")
+        assert out.text.splitlines()[0] == "已记到 未知账号 的进度记录（共 1 条）" and "警告：" in out.text
+        assert env.observe_calls == [False]
+        text = open(self._file(env, "unknown"), encoding="utf-8").read()
+        assert text.startswith("# 未知账号 的进度记录（UID 未知）")
+        assert "警告：" in env.tools.get_progress().text
+
+    def test_get_status_has_account_and_progress_lines(self, acc):
+        text = acc.tools.get_status().text
+        assert f"当前账号：账号甲（UID {UID_A}）" in text
+        assert "本账号进度记录：0 条" in text and "留给用户的未处理事项：0 条" in text
+        acc.tools.record_progress("做了点事")
+        acc.tools.leave_for_user("活动甲", "x")
+        text = acc.tools.get_status().text
+        assert re.search(r"本账号进度记录：1 条，最近一条 \d{4}-\d\d-\d\d \d\d:\d\d:\d\d（用 get_progress 查看）", text)
+        assert "留给用户的未处理事项：1 条" in text
+        switch_to(acc, UID_B)
+        text = acc.tools.get_status().text
+        assert f"当前账号：账号乙（UID {UID_B}）" in text and "留给用户的未处理事项：0 条" in text
+        assert "本账号进度记录：0 条" in text
+
+    def test_get_status_unknown_account(self, tmp_path):
+        text = Env(tmp_path).tools.get_status().text
+        assert "当前账号：未知（还没在画面左下角认到 UID）" in text

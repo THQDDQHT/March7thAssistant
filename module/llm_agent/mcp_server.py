@@ -34,6 +34,7 @@ MIN_TOKEN_LENGTH = 16
 INSTRUCTIONS = (
     "操作《崩坏：星穹铁道》PC 版（三月七小助手 M7A）。先 get_status；能 goto_screen / run_m7a_task 的就别一步步点；"
     "每步看完新观察再决定下一步；护栏拒绝的操作不要绕开；绝不购买、抽卡、花星琼；搞不定的用 leave_for_user 留给用户。"
+    "待办和进度按游戏账号（画面左下角的 UID）分开记：开始先 get_progress 看这个号做到哪了，每轮结束用 record_progress 记一笔。"
 )
 
 
@@ -180,7 +181,7 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def stop_m7a_task():
         return await call(tools.stop_m7a_task)
 
-    @tool("查看状态：游戏窗口在不在、当前界面、正在跑的任务、最近 5 次运行、输入模式（前台或后台）、留给用户的未处理事项数。")
+    @tool("查看状态：游戏窗口在不在、当前界面、正在跑的任务、最近 5 次运行、输入模式（前台或后台）、当前游戏账号、本账号留给用户的未处理事项数和进度记录条数。")
     async def get_status():
         return await call(tools.get_status)
 
@@ -195,13 +196,13 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
                          max_chars: Annotated[int, Field(description="本段最多字符数 500-20000")] = 8000):
         return await call(tools.fetch_page, url, offset, max_chars)
 
-    @tool("把搞不定或不该做的事留给用户：记到 todo_for_user.md 并通过 M7A 通知用户，返回当前未处理的全部事项。之后回到主界面继续做别的。")
+    @tool("把搞不定或不该做的事留给用户：记到当前账号的待办文件（todo_for_user-<UID>.md）并通过 M7A 通知用户，返回当前账号未处理的全部事项。之后回到主界面继续做别的。")
     async def leave_for_user(item: Annotated[str, Field(description="事项名称，例如活动名")],
                              reason: Annotated[str, Field(description="为什么留给用户")],
                              how_to_reach: Annotated[str, Field(description="怎么进到那个界面")] = ""):
         return await call(tools.leave_for_user, item, reason, how_to_reach)
 
-    @tool("把留给用户的某条事项标为已处理（在 todo_for_user.md 里勾掉并记下说明和时间）。只有这件事真正完成了才调用。"
+    @tool("把留给用户的某条事项标为已处理（在当前账号的待办文件里勾掉并记下说明和时间）。只有这件事真正完成了才调用。"
           "名称先按完全相同匹配，再按包含关系匹配；匹配不到或匹配到多条会报错并列出未处理清单。返回更新后的未处理清单。")
     async def resolve_todo(item: Annotated[str, Field(description="事项名称（leave_for_user 时写的 item）")],
                            note: Annotated[str, Field(description="处理说明，例如怎么完成的")] = ""):
@@ -227,9 +228,17 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
                              value: Annotated[Any, Field(description="新值（JSON 值，类型见工具说明）")]):
         return await call(tools.set_m7a_config, key, value)
 
-    @tool("读出留给用户、还没处理的事项清单。")
+    @tool("读出当前账号留给用户、还没处理的事项清单。")
     async def list_todo_for_user():
         return await call(tools.list_todo_for_user)
+
+    @tool("把这一轮做了什么、还剩什么记到当前账号的进度记录里（每轮结束时调用一次）")
+    async def record_progress(summary: Annotated[str, Field(description="这一轮做了什么、还剩什么，1-6000 字")]):
+        return await call(tools.record_progress, summary)
+
+    @tool("读出当前账号最近的进度记录（开始时先看，知道这个号已经做到哪了）")
+    async def get_progress(max_chars: Annotated[int, Field(description="最多返回的字符数 500-20000，从最新往前取")] = 4000):
+        return await call(tools.get_progress, max_chars)
 
     return mcp
 

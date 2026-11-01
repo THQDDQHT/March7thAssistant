@@ -17,7 +17,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 EXPECTED_TOOLS = sorted("""observe click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
-    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user list_characters get_m7a_config set_m7a_config""".split())
+    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user record_progress get_progress list_characters get_m7a_config set_m7a_config""".split())
 
 
 class FakeTools:
@@ -116,6 +116,13 @@ class TestRegistration:
         assert by_name["press_keys"].inputSchema["properties"]["gap_seconds"]["default"] == 0.3
         assert by_name["scroll"].inputSchema["required"] == ["direction"]
         assert by_name["fetch_page"].inputSchema["properties"]["max_chars"]["default"] == 8000
+        assert by_name["record_progress"].inputSchema["required"] == ["summary"]
+        assert by_name["record_progress"].inputSchema["properties"]["summary"]["type"] == "string"
+        assert by_name["get_progress"].inputSchema.get("required", []) == []
+        assert by_name["get_progress"].inputSchema["properties"]["max_chars"]["type"] == "integer"
+        assert by_name["get_progress"].inputSchema["properties"]["max_chars"]["default"] == 4000
+        assert by_name["record_progress"].description.startswith("把这一轮做了什么、还剩什么记到当前账号的进度记录里")
+        assert by_name["get_progress"].description.startswith("读出当前账号最近的进度记录")
         assert all(tool.description for tool in tools)
 
     def test_observation_tool_returns_text_and_jpeg(self):
@@ -145,6 +152,9 @@ class TestRegistration:
             await mcp.call_tool("set_m7a_config", {"key": "forgottenhall_level", "value": [1, 12]})
             await mcp.call_tool("set_m7a_config", {"key": "forgottenhall_enable", "value": True})
             await mcp.call_tool("list_characters", {})
+            await mcp.call_tool("record_progress", {"summary": "日常做完"})
+            await mcp.call_tool("get_progress", {})
+            await mcp.call_tool("get_progress", {"max_chars": 1000})
 
         asyncio.run(run())
         assert tools.calls == [
@@ -152,7 +162,7 @@ class TestRegistration:
             ("leave_for_user", ("活动", "难", "")), ("web_search", ("攻略", 8)),
             ("resolve_todo", ("活动", "")), ("get_m7a_config", (["forgottenhall_level"],)), ("get_m7a_config", ([],)),
             ("set_m7a_config", ("forgottenhall_level", [1, 12])), ("set_m7a_config", ("forgottenhall_enable", True)),
-            ("list_characters", ())]
+            ("list_characters", ()), ("record_progress", ("日常做完",)), ("get_progress", (4000,)), ("get_progress", (1000,))]
 
     def test_text_only_tool(self):
         mcp = ms.create_mcp(FakeTools())
