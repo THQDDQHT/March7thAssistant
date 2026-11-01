@@ -13,6 +13,7 @@ M7A 认不出当前游戏界面、或者切换界面超时的时候，不再直�
 第二期（MCP server，把 M7A 的能力包装成工具，让 Codex 直接操作游戏）：
 - mcp_tools.py：全部工具逻辑（不依赖 mcp 包，可单测）
 - search.py：DeepSeek Search / Fetch 客户端
+- battle_hud.py：战斗状态识别（read_battle_hud：阶段、选中的技能、技能点、终结技、波次等；固定区域像素运算 + 小块 OCR）
 - mcp_server.py：FastMCP 接线、token 中间件、启动参数（需要 mcp>=1.20,<2，用 uv run --with 叠加）
 
 工具层（observe / guard / actions）不依赖 DeepSeek。默认关闭，见 config.example.yaml 的 llm_takeover_* 配置。
