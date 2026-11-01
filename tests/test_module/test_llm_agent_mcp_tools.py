@@ -12,10 +12,12 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
+from module.llm_agent import battle_hud as bh
 from module.llm_agent import guard as gd
 from module.llm_agent import mcp_tools as mt
 from module.llm_agent.errors import passthrough_exceptions
 from module.llm_agent.observe import Element, Observation
+from module.llm_agent.observe import annotate as ob_annotate
 from module.llm_agent.search import FetchedPage, SearchError, SearchResult
 
 KEY = "sk-test-SECRET-1234567890"
@@ -271,6 +273,205 @@ class TestObserve:
         # 锁已释放，之后还能用
         env.tools._observer = lambda grid: make_obs()
         assert env.tools.observe().image
+
+
+# ---------------------------------------------------------------- 战斗状态 ----
+
+def battle_hud(**kwargs):
+    base = dict(in_battle=True, phase="command", selected="skill", skill_points=3, team_size=3,
+                slots=[bh.SlotHud(1, True), bh.SlotHud(2, False), bh.SlotHud(3, True)], rounds_left=2, wave=(1, 2),
+                auto_on=False, speed_on=True)
+    base.update(kwargs)
+    return bh.BattleHud(**base)
+
+
+def plain_observation_text(env, head="观察 #1｜当前界面：主界面（main）"):
+    """没有战斗状态时 observe 的文字（战斗状态这个功能加进来之前的样子）。"""
+    obs = make_obs(env.texts)
+    return "\n".join([
+        head,
+        f"图片：标注图（元素框上的编号就是 click 的 id）；输入模式：{env.tools._input_mode()}",
+        "元素表（[编号] 文字 @ (横%, 纵%)）：",
+        obs.table_text(),
+        "提示：点不到的纯图标按钮：observe(grid=true) 后用 click_grid。",
+    ])
+
+
+class TestBattleHudInObserve:
+    def test_battle_adds_status_line_and_drops_unknown_screen_hint(self, tmp_path):
+        env = Env(tmp_path, recognized=None)
+        env.tools._hud_reader = lambda image: battle_hud()
+        out = env.tools.observe()
+        assert ("战斗状态：轮到我方出手｜选中：战技｜技能点 3｜终结技就绪：1号、3号｜剩余轮次 2｜波次 1/2｜自动：关｜倍速：开"
+                in out.text.splitlines())
+        assert "当前界面：未知" in out.text  # 界面行不变
+        assert "界面未知" not in out.text and "press_key(esc)" not in out.text
+        assert "[1] 关闭 @" in out.text  # 元素表照常给
+        assert "战斗画面（不画元素框" in out.text
+
+    def test_battle_image_has_no_element_boxes(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        battle_image = env.tools.observe().image
+        env.tools._hud_reader = lambda image: bh.BattleHud(in_battle=False)
+        plain_image = env.tools.observe().image
+        obs = make_obs(env.texts)
+        assert battle_image == ob_annotate(obs.image, [])
+        assert plain_image == ob_annotate(obs.image, obs.elements)
+        assert battle_image != plain_image
+
+    def test_grid_mode_keeps_grid_in_battle(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        out = env.tools.observe(grid=True)
+        assert "网格图" in out.text and "战斗状态：" in out.text
+        assert out.image == ob_annotate(make_obs().image, [], grid=True)
+
+    def test_actions_return_the_status_line_too(self, env):
+        env.tools._hud_reader = lambda image: battle_hud(selected="basic")
+        env.tools.observe()
+        out = env.tools.press_key("e")
+        assert "选中：普攻" in out.text
+
+    @pytest.mark.parametrize("hud", [None, "no_hud"])
+    def test_outside_battle_output_is_unchanged(self, env, hud):
+        # 不在战斗中（识别结果是非战斗 / 识别出错）：文字和图都和没有这个功能时一模一样
+        if hud is None:
+            env.tools._hud_reader = lambda image: bh.BattleHud(in_battle=False)
+        else:
+            def broken(image):
+                raise RuntimeError("识别炸了")
+            env.tools._hud_reader = broken
+        out = env.tools.observe()
+        assert out.text == plain_observation_text(env)
+        obs = make_obs(env.texts)
+        assert out.image == ob_annotate(obs.image, obs.elements)
+
+    def test_default_reader_leaves_ordinary_screens_alone(self, env):
+        out = env.tools.observe()
+        assert out.text == plain_observation_text(env)
+        assert env.tools._last.hud.in_battle is False
+
+    def test_unknown_screen_hint_still_there_outside_battle(self, tmp_path):
+        env = Env(tmp_path, recognized=None)
+        out = env.tools.observe()
+        assert "界面未知：先试 press_key(esc)" in out.text and "战斗状态" not in out.text
+
+    def test_result_page_gets_a_line_but_keeps_boxes_and_hints(self, tmp_path):
+        env = Env(tmp_path, recognized=None)
+        env.tools._hud_reader = lambda image: bh.BattleHud(in_battle=False, phase="result", result_text="挑战结束")
+        out = env.tools.observe()
+        assert "战斗状态：结算页（挑战结束）" in out.text.splitlines()
+        assert "界面未知：先试 press_key(esc)" in out.text
+        obs = make_obs(env.texts)
+        assert out.image == ob_annotate(obs.image, obs.elements)
+
+    def test_hud_error_is_logged_not_raised(self, env):
+        warnings = []
+        env.tools._warn = warnings.append
+
+        def broken(image):
+            raise ValueError("读不出来")
+        env.tools._hud_reader = broken
+        out = env.tools.observe()
+        assert out.image and "观察 #1" in out.text
+        assert any("识别战斗状态出错" in w and "读不出来" in w for w in warnings)
+        assert env.tools._last.hud is None
+
+    def test_status_is_recorded_observation_gets_hud(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        env.tools.observe()
+        assert env.tools._last.hud.skill_points == 3
+
+
+class TestBattleState:
+    def test_returns_status_and_panel(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        out = env.tools.battle_state()
+        lines = out.text.splitlines()
+        assert lines[0].startswith("战斗状态：轮到我方出手｜选中：战技｜技能点 3｜")
+        assert "各位置终结技：1号 可放；2号 未满；3号 可放" in out.text
+        import io
+        image = Image.open(io.BytesIO(out.image))
+        assert image.size[0] == 1280 and image.size[1] > 720
+
+    def test_read_only_no_input_and_last_observation_untouched(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        env.tools.observe()
+        seq, last = env.tools._last_seq, env.tools._last
+        env.tools.battle_state()
+        assert env.tools._last is last and env.tools._last_seq == seq
+        assert env.auto.calls == []
+        assert env.records() == []  # 只读工具不写操作记录
+
+    def test_works_without_a_previous_observation(self, env):
+        env.tools._hud_reader = lambda image: battle_hud()
+        assert env.tools._last is None
+        assert "战斗状态：" in env.tools.battle_state().text
+        assert env.tools._last is None
+
+    def test_not_in_battle_says_so(self, env):
+        out = env.tools.battle_state()
+        assert out.text.startswith("战斗状态：没有识别到战斗界面") and out.image
+
+    def test_hud_reader_error_is_reported_as_not_recognized(self, env):
+        warnings = []
+        env.tools._warn = warnings.append
+        env.tools._hud_reader = lambda image: (_ for _ in ()).throw(RuntimeError("坏了"))
+        out = env.tools.battle_state()
+        assert "没有识别到战斗界面" in out.text and out.image
+        assert any("识别战斗状态出错" in w for w in warnings)
+
+    def test_screenshot_error_is_reported(self, env):
+        env.tools._observer = lambda grid: (_ for _ in ()).throw(RuntimeError("截图超时"))
+        assert "读取战斗状态失败：截图超时" in env.tools.battle_state().text
+
+    def test_passthrough_exception_is_raised(self, env):
+        classes = passthrough_exceptions()
+        if not classes:
+            pytest.skip("没有后台输入模块")
+        env.tools._observer = lambda grid: (_ for _ in ()).throw(classes[0]("窗口持续最小化"))
+        with pytest.raises(classes[0]):
+            env.tools.battle_state()
+        env.tools._observer = lambda grid: make_obs()
+        assert env.tools.battle_state().image  # 锁已释放
+
+    def test_busy_when_lock_held(self, env, monkeypatch):
+        monkeypatch.setattr(mt, "LOCK_TIMEOUT", 0.05)
+        assert env.tools._lock.acquire(timeout=1)
+        try:
+            assert "另一个操作还在执行" in env.tools.battle_state().text
+        finally:
+            env.tools._lock.release()
+        assert env.tools.battle_state().image
+
+    def test_still_allowed_while_a_task_is_running(self, env):
+        # 只读观察类工具和 observe 一样：有 M7A 任务在跑也能看
+        env.runs.active = {"task": "daily", "run_id": "r1"}
+        env.tools._hud_reader = lambda image: battle_hud()
+        assert "战斗状态：轮到我方出手" in env.tools.battle_state().text
+
+    def test_foreground_handling_like_observe(self, tmp_path):
+        env = Env(tmp_path / "a", front=False)  # 后台截图（默认）：不抢焦点
+        env.tools.battle_state()
+        assert env.game.bring_calls == 0
+        env = Env(tmp_path / "b", front=False, config={"use_background_screenshot": False})
+        env.tools.battle_state()
+        assert env.game.bring_calls == 1
+        env = Env(tmp_path / "c", front=False, config={"use_background_screenshot": False})
+        env.game.can_front = False
+        out = env.tools.battle_state()
+        assert "读取战斗状态失败" in out.text and "找不到游戏窗口" in out.text and out.image is None
+
+    def test_real_screenshot_path_without_observer(self, tmp_path):
+        env = Env(tmp_path)
+        shots = []
+
+        def take_screenshot():
+            shots.append(1)
+            return Image.new("RGB", (1920, 1080), (30, 30, 30)), (0, 0, 1920, 1080), 1.0
+        env.auto.take_screenshot = take_screenshot
+        env.tools._observer = None
+        out = env.tools.battle_state()
+        assert shots == [1] and out.text.startswith("战斗状态：没有识别到战斗界面")
 
 
 # ---------------------------------------------------------------- click ----

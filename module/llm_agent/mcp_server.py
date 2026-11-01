@@ -121,9 +121,15 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     def tool(description: str):
         return mcp.tool(description=description, structured_output=False)
 
-    @tool("看当前游戏画面：返回当前界面、元素表（编号 + 文字 + 位置）和标注图。grid=true 时标注图改成 16×9 网格，用来点识别不出文字的图标。")
+    @tool("看当前游戏画面：返回当前界面、元素表（编号 + 文字 + 位置）和标注图。战斗中额外给一行「战斗状态」，且不画元素框。grid=true 时标注图改成 16×9 网格，用来点识别不出文字的图标。")
     async def observe(grid: Annotated[bool, Field(description="是否叠加网格（click_grid 之前需要）")] = False):
         return await call(tools.observe, grid)
+
+    @tool("读战斗状态（只读，不发任何输入）：是不是战斗界面、轮到我方出手还是动画/终结技待释放/结算页、选中的是普攻还是战技、技能点几个、"
+          "各位置终结技亮没亮、剩余轮次、波次、自动和倍速。返回一张干净的 1280×720 画面，下面拼了放大的 HUD 局部（行动顺序和沙漏、角色栏、技能按钮和技能点）。"
+          "战斗里每次按键后用它确认状态，比 observe 快也准；读不准的字段会写「不确定」。")
+    async def battle_state():
+        return await call(tools.battle_state)
 
     @tool("点击最近一次观察里编号为 id 的元素。会过护栏（危险词、确认类按钮）。执行后自动返回新画面。")
     async def click(id: Annotated[int, Field(description="元素表里的编号")]):

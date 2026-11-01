@@ -8,9 +8,12 @@ import io
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
+
+if TYPE_CHECKING:
+    from module.llm_agent.battle_hud import BattleHud
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -82,6 +85,11 @@ class Observation:
     grid: bool = False  # 标注图是否叠加网格
     screenshot_pos: Optional[tuple] = None
     scale: Optional[float] = None
+    hud: Optional["BattleHud"] = None  # 战斗状态（mcp_tools 观察时顺带识别）；在战斗中时标注图不画编号框
+
+    @property
+    def in_battle(self) -> bool:
+        return getattr(self.hud, "in_battle", None) is True
 
     @property
     def size(self) -> Tuple[int, int]:
@@ -100,7 +108,8 @@ class Observation:
         return format_element_table(self.elements, self.size)
 
     def annotated_jpeg(self) -> bytes:
-        return annotate(self.image, self.elements, grid=self.grid)
+        # 战斗画面里元素表基本是噪声，编号框还会压住 Q/E 按钮，所以战斗中只给干净的缩放图
+        return annotate(self.image, [] if self.in_battle else self.elements, grid=self.grid)
 
 
 # ---------------------------------------------------------------- 元素整理 ----

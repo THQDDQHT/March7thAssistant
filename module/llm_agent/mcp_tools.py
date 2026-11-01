@@ -1,6 +1,7 @@
 """第二期 MCP 工具的逻辑层（不依赖 mcp 包，可以单测）。
 
-把 M7A 的能力包装成一组工具：看画面（observe）、点按钮（click / click_grid / press_key / scroll / drag / wait）、
+把 M7A 的能力包装成一组工具：看画面（observe）、读战斗状态（battle_state）、
+点按钮（click / click_grid / press_key / scroll / drag / wait）、
 跳转界面（list_screens / goto_screen）、运行 M7A 任务（list_m7a_tasks / run_m7a_task / stop_m7a_task / get_status）、
 联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）、
 记录和读取进度（record_progress / get_progress）、读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）、
@@ -29,6 +30,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
+from module.llm_agent import battle_hud
 from module.llm_agent import config as llm_config
 from module.llm_agent import mcp_config, scancode_input
 from module.llm_agent.actions import Action, ActionExecutor, ActionResult, normalize_action
@@ -746,7 +748,7 @@ class McpTools:
                  search: Optional[DeepSeekSearch] = None, runs=None, config_get: Optional[Callable] = None,
                  popen: Callable = subprocess.Popen, run: Callable = subprocess.run,
                  notify: Optional[Callable] = None, notify_runner: Optional[Callable] = None,
-                 config_service: Optional[mcp_config.ConfigService] = None,
+                 config_service: Optional[mcp_config.ConfigService] = None, hud_reader: Optional[Callable] = None,
                  character_ids: Optional[Callable] = None, character_names: Optional[Callable] = None,
                  screens_path: str = SCREENS_PATH, sleep: Callable = time.sleep, clock: Callable = time.monotonic,
                  settle_seconds: float = SETTLE_SECONDS, task_poll_seconds: float = 2.0):
@@ -768,6 +770,7 @@ class McpTools:
         self._notify = notify
         self._notify_runner = notify_runner
         self._config_service = config_service
+        self._hud_reader = hud_reader or battle_hud.read_battle_hud
         self._character_ids = character_ids or mcp_config.list_character_ids
         self._character_names = character_names or mcp_config.load_character_names
 
@@ -1046,6 +1049,10 @@ class McpTools:
             self.tracker.update(observation)
         except Exception as e:  # 认账号失败不能影响观察
             self._warn(f"识别账号出错：{self._safe(e)}")
+        try:
+            observation.hud = self._hud_reader(observation.image)
+        except Exception as e:  # 认战斗状态失败不能影响观察
+            self._warn(f"识别战斗状态出错：{self._safe(e)}")
         self._last_screen = self._detect_screen()
         self._last = observation
         self._last_seq += 1
@@ -1060,10 +1067,15 @@ class McpTools:
             head = f"观察 #{self._last_seq}｜当前界面：未知（M7A 认不出，可能是弹窗、活动页或正在加载）"
         if observation.grid:
             picture = "网格图（16×9，格子 A1–P9，用 click_grid 点格子中心）"
+        elif observation.in_battle:
+            picture = "战斗画面（不画元素框，编号只在下面的元素表里；战斗状态以「战斗状态」那行为准）"
         else:
             picture = "标注图（元素框上的编号就是 click 的 id）"
-        lines = [head, f"图片：{picture}；输入模式：{self._input_mode()}", "元素表（[编号] 文字 @ (横%, 纵%)）：",
-                 observation.table_text()]
+        lines = [head, f"图片：{picture}；输入模式：{self._input_mode()}"]
+        hud_line = battle_hud.describe_hud(observation.hud) if observation.hud is not None else None
+        if hud_line:
+            lines.append(hud_line)
+        lines += ["元素表（[编号] 文字 @ (横%, 纵%)）：", observation.table_text()]
         notice = self.tracker.take_notice()  # 平时不加账号行（省 token），只在切换或第一次认出账号时提醒
         if notice:
             lines.insert(0, notice)
@@ -1075,7 +1087,7 @@ class McpTools:
             hints.append("没有识别到文字：用 observe(grid=true) 看网格图，再用 click_grid 点图标。")
         elif not observation.grid:
             hints.append("点不到的纯图标按钮：observe(grid=true) 后用 click_grid。")
-        if not screen_id:
+        if not screen_id and not observation.in_battle:  # 战斗里 M7A 本来就认不出界面，esc 在战斗里是误导
             hints.append("界面未知：先试 press_key(esc)，不行再 goto_screen(main)；搞不定就 leave_for_user。")
         if hints:
             lines.append("提示：" + " ".join(hints))
@@ -1202,6 +1214,43 @@ class McpTools:
                 return self._observation_output(observation)
         except ToolBusy as e:
             return ToolOutput(f"【未执行】{e}")
+
+    def battle_state(self) -> ToolOutput:
+        """只读：截一张图，读战斗状态（不跑整屏 OCR，不改「最近一次观察」，不发任何输入）。"""
+        try:
+            with self._exclusive():
+                problem = self._ensure_front(False)
+                if problem:
+                    return ToolOutput(f"读取战斗状态失败：{problem}")
+                try:
+                    image = self._screenshot()
+                except Exception as e:
+                    reraise_passthrough(e)
+                    return ToolOutput(f"读取战斗状态失败：{self._safe(e)}")
+                try:
+                    hud = self._hud_reader(image)
+                except Exception as e:
+                    self._warn(f"识别战斗状态出错：{self._safe(e)}")
+                    hud = None
+                try:
+                    panel = battle_hud.render_hud_panel(image)
+                except Exception as e:
+                    self._warn(f"生成战斗状态图出错：{self._safe(e)}")
+                    panel = None
+                line = battle_hud.describe_hud(hud) if hud is not None else None
+                if line:
+                    text = line + "\n" + battle_hud.format_hud_details(hud)
+                else:
+                    text = "战斗状态：没有识别到战斗界面（可能不在战斗中，或者 HUD 被过场动画盖住了）；用 observe 看画面。"
+                return ToolOutput(text, panel)
+        except ToolBusy as e:
+            return ToolOutput(f"【未执行】{e}")
+
+    def _screenshot(self):
+        """只截图（不 OCR）。注入了 observer（离线、测试）时用它的图。"""
+        if self._observer is not None:
+            return self._observer(False).image
+        return self.auto.take_screenshot()[0]
 
     # ------------------------------------------------------------ 点击和按键 ----
 

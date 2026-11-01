@@ -16,7 +16,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
-EXPECTED_TOOLS = sorted("""observe click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
+EXPECTED_TOOLS = sorted("""observe battle_state click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
     run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user record_progress get_progress list_characters get_m7a_config set_m7a_config switch_account""".split())
 
 
@@ -29,7 +29,7 @@ class FakeTools:
     def __getattr__(self, name):
         def method(*args):
             self.calls.append((name, args))
-            image = JPEG if name in ("observe", "click") else None
+            image = JPEG if name in ("observe", "battle_state", "click") else None
             return ToolOutput(f"{name} 的结果", image)
         return method
 
