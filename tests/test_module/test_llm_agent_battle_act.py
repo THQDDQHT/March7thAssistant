@@ -207,6 +207,81 @@ def test_ultimate_ready_or_unknown_enters_pending_then_confirms(arena, ready):
     assert arena.keys == ["2", "space"]
 
 
+def slot_hud(ready, phase=bh.PHASE_COMMAND):
+    state = hud(phase=phase, ready=False)
+    state.slots[2].ult_ready = ready
+    return state
+
+
+@pytest.mark.parametrize("action", ["ultimate", "confirm_pending"])
+def test_hidden_ultimate_animation_ready_consumption_is_completion_evidence(arena, action):
+    arena.current = slot_hud(True, bh.PHASE_ULT_PENDING if action == "confirm_pending" else bh.PHASE_COMMAND)
+    def press(key):
+        if key == "3":
+            arena.current = slot_hud(True, bh.PHASE_ULT_PENDING)
+        elif key == "space":
+            arena.after_frames = [bh.BattleHud(in_battle=False), bh.BattleHud(in_battle=False),
+                                  slot_hud(False), slot_hud(False)]
+        return ActionResult(True, "已发键")
+    arena.on_press = press
+    out = arena.act(action, **({"slot": 3} if action == "ultimate" else {}))
+    assert "已观察完成" in out.text and "3号终结技就绪状态已消耗" in out.text
+    assert arena.keys == (["3", "space"] if action == "ultimate" else ["space"])
+    assert ("未核实释放者" in out.text) is (action == "confirm_pending")
+    assert arena.record()["evidence"] == ["3号终结技就绪状态已消耗" + ("（未核实释放者）" if action == "confirm_pending" else "")]
+
+
+@pytest.mark.parametrize("after_ready", [None, True])
+@pytest.mark.parametrize("action", ["ultimate", "confirm_pending"])
+def test_hidden_ultimate_without_explicit_ready_consumption_is_unknown(arena, action, after_ready):
+    arena.current = slot_hud(True, bh.PHASE_ULT_PENDING if action == "confirm_pending" else bh.PHASE_COMMAND)
+    def press(key):
+        if key == "3":
+            arena.current = slot_hud(True, bh.PHASE_ULT_PENDING)
+        elif key == "space":
+            arena.after_frames = [bh.BattleHud(in_battle=False), slot_hud(after_ready), slot_hud(after_ready)]
+        return ActionResult(True, "已发键")
+    arena.on_press = press
+    assert "执行结果不确定" in arena.act(action, **({"slot": 3} if action == "ultimate" else {})).text
+    assert arena.keys.count("space") == 1 and arena.record()["evidence"] == []
+
+
+def test_transient_single_false_ultimate_readiness_cannot_complete(arena):
+    arena.current = slot_hud(True, bh.PHASE_ULT_PENDING)
+    def press(key):
+        arena.after_frames = [bh.BattleHud(in_battle=False), slot_hud(False), slot_hud(None),
+                              slot_hud(False), slot_hud(True)]
+        return ActionResult(True, "已发键")
+    arena.on_press = press
+    assert "执行结果不确定" in arena.act("confirm_pending").text
+    assert arena.keys == ["space"] and arena.record()["evidence"] == []
+
+
+def test_initial_unknown_ultimate_readiness_cannot_be_counted_as_consumed(arena):
+    arena.current = slot_hud(None, bh.PHASE_ULT_PENDING)
+    def press(key):
+        arena.after_frames = [bh.BattleHud(in_battle=False), slot_hud(False), slot_hud(False)]
+        return ActionResult(True, "已发键")
+    arena.on_press = press
+    assert "执行结果不确定" in arena.act("confirm_pending").text
+    assert arena.record()["evidence"] == []
+
+
+def test_other_slot_ready_consumption_cannot_prove_requested_ultimate_completed(arena):
+    arena.current = hud(ready=True)
+    def press(key):
+        if key == "3":
+            arena.current = hud(bh.PHASE_ULT_PENDING, ready=True)
+        elif key == "space":
+            first, second = hud(ready=True), hud(ready=True)
+            first.slots[0].ult_ready = second.slots[0].ult_ready = False
+            arena.after_frames = [bh.BattleHud(in_battle=False), first, second]
+        return ActionResult(True, "已发键")
+    arena.on_press = press
+    assert "执行结果不确定" in arena.act("ultimate", slot=3).text
+    assert arena.record()["evidence"] == []
+
+
 def test_ultimate_known_not_full_has_no_input_and_no_guessed_energy_message(arena):
     arena.current = hud(ready=False)
     text = arena.act("ultimate", slot=2, timeout_seconds=12).text

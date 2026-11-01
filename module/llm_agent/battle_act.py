@@ -210,6 +210,13 @@ class _Action:
     def wait_after_confirm(self, confirmed):
         baseline = confirmed.hud
         command_count = 0
+        # 终结技动画可能整段隐藏 HUD，既没有 OTHER 也不改变技能点。
+        # 只接受确认前明确就绪、之后同一槽连续两张稳定指令帧明确未就绪的消耗证据。
+        ready_slots = {
+            item.index: 0 for item in baseline.slots
+            if item.ult_ready is True and (
+                self.action == "confirm_pending" or self.action == "ultimate" and item.index == self.slot)
+        }
         while True:
             self.pause()
             observation = self.observe()
@@ -225,7 +232,18 @@ class _Action:
                     and hud.skill_points != baseline.skill_points and "技能点变化" not in self.evidence):
                 self.evidence.append("技能点变化")
             # HUD 暂时隐藏不等于离开战斗，也不能单凭这一帧证明动作发生，继续有界观察。
-            command_count = command_count + 1 if self.eligible(observation, bh.PHASE_COMMAND) else 0
+            stable_command = self.eligible(observation, bh.PHASE_COMMAND)
+            command_count = command_count + 1 if stable_command else 0
+            current_slots = {item.index: item.ult_ready for item in hud.slots} if hud is not None else {}
+            for index in ready_slots:
+                ready_slots[index] = ready_slots[index] + 1 if stable_command and current_slots.get(index) is False else 0
+                if ready_slots[index] >= STABLE_LOOKS:
+                    label = f"{index}号终结技就绪状态已消耗"
+                    if self.action == "confirm_pending":
+                        label += "（未核实释放者）"
+                    if label not in self.evidence:
+                        self.evidence.append(label)
+                        self.note("ultimate_ready_consumed", slot=index, attributed=self.action == "ultimate")
             if command_count >= STABLE_LOOKS and self.evidence:
                 return "已观察到状态变化并回到稳定可输入阶段（证据：" + "、".join(self.evidence) + "）"
 
