@@ -3,7 +3,8 @@
 把 M7A 的能力包装成一组工具：看画面（observe）、点按钮（click / click_grid / press_key / scroll / drag / wait）、
 跳转界面（list_screens / goto_screen）、运行 M7A 任务（list_m7a_tasks / run_m7a_task / stop_m7a_task / get_status）、
 联网搜索（web_search / fetch_page）、把搞不定的事留给用户（leave_for_user / resolve_todo / list_todo_for_user）、
-记录和读取进度（record_progress / get_progress）、读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）。
+记录和读取进度（record_progress / get_progress）、读写逐光捡金和体力计划的配置（list_characters / get_m7a_config / set_m7a_config）、
+切换游戏账号（switch_account，流程在 account_switch.py：退回登录页，在登录框里选号再进游戏）。
 
 - 「最近一次观察」状态：元素编号和格子坐标都针对最近一次观察的结果。
 - 动作类工具执行后自动等画面稳定，再观察一次，把新画面一起返回。
@@ -337,6 +338,13 @@ class McpExecutor(ActionExecutor):
         if done is False:
             return ActionResult(False, f"按 {key} 键没有完成（窗口不可用）")
         return ActionResult(True, f"按了 {key} 键" + (f"，按住 {hold:g} 秒" if hold > 0 else ""))
+
+    def click_point(self, observation, point: Tuple[int, int], label: str) -> ActionResult:
+        """点截图坐标里的一个点（switch_account 用：目标由它自己的识别函数定位，不走元素编号和护栏）。"""
+        x, y = point
+        if not self._click_rect([[x, y], [x, y], [x, y], [x, y]], observation):
+            return ActionResult(False, f"点击「{label}」没有完成（窗口不可用或鼠标被占用）")
+        return ActionResult(True, f"点击了「{label}」")
 
     def scroll(self, observation, point: Tuple[int, int], direction: str, amount: int) -> ActionResult:
         x, y = self._abs_point(observation, *point)
@@ -1403,6 +1411,13 @@ class McpTools:
             return _Plan(ALLOW, run, f"wait {number:g}", for_input=False)
 
         return self._act("wait", args, plan, "optional")
+
+    # ------------------------------------------------------------ 切换账号 ----
+
+    def switch_account(self, account) -> ToolOutput:
+        """退回登录页再登录目标账号（流程和安全规则见 account_switch.py）。"""
+        from module.llm_agent import account_switch
+        return account_switch.switch_account(self, account)
 
     # ------------------------------------------------------------ 界面跳转 ----
 

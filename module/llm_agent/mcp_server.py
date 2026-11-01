@@ -35,6 +35,7 @@ INSTRUCTIONS = (
     "操作《崩坏：星穹铁道》PC 版（三月七小助手 M7A）。先 get_status；能 goto_screen / run_m7a_task 的就别一步步点；"
     "每步看完新观察再决定下一步；护栏拒绝的操作不要绕开；绝不购买、抽卡、花星琼；搞不定的用 leave_for_user 留给用户。"
     "待办和进度按游戏账号（画面左下角的 UID）分开记：开始先 get_progress 看这个号做到哪了，每轮结束用 record_progress 记一笔。"
+    "要换账号只用 switch_account，不要自己点电源图标和登录页的按钮。"
 )
 
 
@@ -155,6 +156,14 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def drag(from_cell: Annotated[str, Field(description="起点格子，例如 C5")],
                    to_cell: Annotated[str, Field(description="终点格子，例如 L5")]):
         return await call(tools.drag, from_cell, to_cell)
+
+    @tool("切换游戏账号：account 是账号名或 UID（从 logs/mcp_agent/accounts.json 里查，目标账号要登记过 login 字段）。"
+          "会退回登录页，登出（保留登录记录），在登录框里选目标号再进游戏，大约 1–2 分钟，期间不要调用别的操作类工具。"
+          "每一步都先确认画面对了才点，出意外就停下并报告停在哪一步；成功后返回主界面的新画面。"
+          "要切号只用这个工具，不要自己点电源图标、登出、登录框；目标已经是当前账号时什么都不做。"
+          "失败或账号没有 login 字段时用 leave_for_user 留给用户。")
+    async def switch_account(account: Annotated[str, Field(description="账号名（如 accounts.json 里的 name）或 9–10 位 UID")]):
+        return await call(tools.switch_account, account)
 
     @tool("等待几秒（加载、动画），然后返回新画面。")
     async def wait(seconds: Annotated[float, Field(description="1-10 秒")] = 2):
