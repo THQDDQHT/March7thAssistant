@@ -100,13 +100,25 @@ ULT_DISC_RADIUS = 44
 ULT_READY_BRIGHT = 0.30      # 亮色像素占比 ≥ 此值：粉彩液面填满或徽记发光
 ULT_FULL_DISC = (4650, 0.85)  # 圆盘范围内有色像素数 ≥ 此值且集中在圆盘里：圆盘被填满
 ULT_PARTIAL_DISC = 4400      # 有色像素数 ≤ 此值且不亮：只填了一部分 / 灰暗进度环
+ULT_COLOR_PARTIAL_MIN = 2000  # 有色像素数 ≥ 此值（又 ≤ 上面那个）：确实有一块彩色液面，只是没填满；< 此值是灰盘
+ULT_CLEAN_COMPACT = 0.80     # 有色像素集中在圆盘里的比例 ≥ 此值，才相信「液面只填一块」
+ULT_LIQUID_MIN_HUE = 0.20    # 液面的主色相占窗口比例 ≥ 此值
 ULT_CYAN_HUE = (150, 215)    # 主演徽记（青色线条徽记，不是实心圆盘）的色相范围
-ULT_CYAN_DIM = 0.10          # 青色徽记亮色占比 ≤ 此值：暗淡（没满）
+ULT_CYAN_DIM = 0.05          # 青色徽记亮色占比 ≤ 此值：暗淡的线条徽记（没满）
+ULT_CYAN_PARTIAL_DISC = 2900  # 青色液面的有色像素数 ≤ 此值：只填了一小块（没满）
+ULT_WHITE_LEVEL = 240        # 「纯白」像素：三个通道都 ≥ 此值
+# 白 / 银色圆盘：满了是一整盘纯白的徽记（中段纯白占比 ≥ 0.2，圆盘自己的银边会让窗口角上也有一点白，最多到 0.13）；
+# 没满是灰盘加一块下沿的白色液面（含液面上扫过的反光），中段纯白占比是 0。两者差得很远，所以满的阈值取 0.10。
+# 背景发白（过场闪光）时角上的纯白也多，或者窗口里有大片彩色，都不当作满盘。
+ULT_WHITE_READY = (0.10, 0.16, 1500)  # 圆盘中段纯白占比 ≥ 第一个值、角上纯白占比 ≤ 第二个值、有色像素数 ≤ 第三个值
+ULT_WHITE_PARTIAL = 0.06     # 纯白占比（圆盘内和角上）都 ≤ 此值：没有满盘的白，才可能是没满
+ULT_GRAY_MAX_HUE = 0.10      # 灰盘的有色像素占比上限
 
-# 结算页：深色背景 + 居中标题（「挑战结束」等）
-RESULT_TITLE_BOX = (780, 230, 1140, 380)
+# 结算页：深色背景 + 居中标题（米黄色的「挑战结束」、红色的「战斗失败」等）
+RESULT_TITLE_BOX = (780, 200, 1140, 380)
 RESULT_MAX_BRIGHTNESS = 70
-RESULT_MIN_CREAM = 0.004
+RESULT_MIN_CREAM = 0.004  # 标题是米黄色（挑战结束）
+RESULT_MIN_RED = 0.02     # 或者红色（战斗失败）
 RESULT_WORDS = ("挑战结束", "战斗失败", "战斗胜利", "挑战失败", "挑战成功", "战斗结束", "挑战完成")
 
 OCR_SCALE = 3
@@ -226,6 +238,12 @@ def _find_badge(a: np.ndarray, x: int, y: int, r: int) -> Tuple[bool, Tuple[floa
     return found, (round(best[0], 2), round(best[1], 2))
 
 
+def _red_mask(pixels: np.ndarray) -> np.ndarray:
+    """鲜红色（「战斗失败」标题的颜色）。"""
+    r, g, b = pixels[..., 0], pixels[..., 1], pixels[..., 2]
+    return (r > 170) & (g < 110) & (b < 110) & (r - g > 90)
+
+
 def _rect_stats(a: np.ndarray, rect) -> Tuple[float, float]:
     left, top, right, bottom = rect
     pixels = a[top:bottom, left:right].reshape(-1, 3)
@@ -271,6 +289,15 @@ def _status_box(a: np.ndarray) -> bool:
     dark = float((block.max(axis=2) < 85).mean())
     white = float((block.min(axis=2) > 200).mean())
     return dark >= STATUS_MIN_DARK and STATUS_WHITE[0] <= white <= STATUS_WHITE[1]
+
+
+def _switch_state(contrast: float, settled: bool) -> Optional[bool]:
+    """倍速 / 自动开关：框清楚可见是开；没有框只有在界面稳定（能选动作）时才是关。"""
+    if contrast >= BOX_ON_MIN:
+        return True
+    if settled and contrast <= BOX_OFF_MAX:
+        return False
+    return None
 
 
 def _sp_panel(a: np.ndarray) -> float:
@@ -385,6 +412,17 @@ def _ult_disc_stats(a: np.ndarray, k: int) -> dict:
         top = int(smooth.argmax())
         stats["hue_frac"] = round(float(smooth[top]) / area, 3)
         stats["hue"] = top * 10 + 5
+    # 无彩色（白 / 银）圆盘：统计纯白像素占比（发光的徽记和满盘是一大片纯白），圆盘四角外面的纯白占比（背景是白的就不可信），
+    # 以及圆盘上沿和下沿两条横带的平均亮度（只填了一部分时上沿明显比下沿暗）
+    pure = window.min(axis=2)
+    core = pure[:, 10:-10]
+    stats["white"] = round(float((core >= ULT_WHITE_LEVEL).mean()), 3)
+    stats["white_mid"] = round(float((core[20:60] >= ULT_WHITE_LEVEL).mean()), 3)  # 中间一段：满盘有整个徽记，液面只在最下面
+    corners = np.concatenate([pure[:10, 10:20].ravel(), pure[:10, -20:-10].ravel(),
+                              pure[-10:, 10:20].ravel(), pure[-10:, -20:-10].ravel()])
+    stats["white_outside"] = round(float((corners >= ULT_WHITE_LEVEL).mean()), 3)
+    stats["top"] = int(mx[8:24, 20:-20].mean())
+    stats["bottom"] = int(mx[60:76, 20:-20].mean())
     if total:
         rows, cols = np.mgrid[0:window.shape[0], 0:window.shape[1]]
         best = 0
@@ -398,18 +436,32 @@ def _ult_disc_stats(a: np.ndarray, k: int) -> dict:
 
 
 def _ult_ready(stats: dict) -> Optional[bool]:
-    """圆盘统计 → 终结技是否可放。能量满时圆盘整个被填满（粉彩或深色实心盘）或徽记发光；
-    没满时是灰暗的进度环 / 液面只填一部分。只在很明确时给 True / False，中间状态给 None。
+    """圆盘统计 → 终结技是否可放。能量满时圆盘整个被填满（粉彩、深色实心盘、白 / 银色盘）或徽记发光；
+    没满时是灰暗的进度环 / 液面只填一部分。
+
+    True 要有明确的「满」特征；False 只给确认没满的（灰暗、明显只填一部分，或认得的暗淡徽记）；
+    圆盘风格没见过、判断不了的一律 None——宁可不确定，也不把能放说成不能放。
     """
     bright, hue = stats["bright"], stats["hue"]
     if bright >= ULT_READY_BRIGHT:
         return True
     if hue is not None and ULT_CYAN_HUE[0] <= hue <= ULT_CYAN_HUE[1]:
-        return False if bright <= ULT_CYAN_DIM else None
+        # 青色徽记：线条徽记暗淡是没满；液面只填了一小块也是没满。淡蓝色的液面填满、但徽记没有发光，
+        # 是「快满了还是满了」说不准（实机上这种盘之后才会发光），报 None
+        return False if bright <= ULT_CYAN_DIM or stats["disc"] <= ULT_CYAN_PARTIAL_DISC else None
     if stats["disc"] >= ULT_FULL_DISC[0] and stats["compact"] >= ULT_FULL_DISC[1]:
         return True
-    if stats["disc"] <= ULT_PARTIAL_DISC and bright < 0.25:
-        return False
+    if (stats["white_mid"] >= ULT_WHITE_READY[0] and stats["white_outside"] <= ULT_WHITE_READY[1]
+            and stats["disc"] <= ULT_WHITE_READY[2]):
+        return True
+    if stats["white"] > ULT_WHITE_PARTIAL or stats["white_outside"] > ULT_WHITE_PARTIAL:
+        return None  # 有不少白但不够「满」，也可能是背景在发白
+    if bright < 0.25:
+        if (ULT_COLOR_PARTIAL_MIN <= stats["disc"] <= ULT_PARTIAL_DISC and stats["compact"] >= ULT_CLEAN_COMPACT
+                and stats["hue_frac"] >= ULT_LIQUID_MIN_HUE):
+            return False  # 彩色液面只填了一块，圆盘范围里干干净净（背景没有大片颜色）
+        if stats["disc"] < ULT_COLOR_PARTIAL_MIN and stats["hue_frac"] <= ULT_GRAY_MAX_HUE:
+            return False  # 灰暗的进度环 / 放完之后的空盘：几乎没有彩色像素
     return None
 
 
@@ -524,8 +576,8 @@ def read_battle_hud(image: Image.Image, ocr: Optional[Callable] = None) -> Battl
     # ---- 倍速 / 自动
     speed_c, auto_c = _box_contrast(a, SPEED_BOX), _box_contrast(a, AUTO_BOX)
     debug.update(speed_box=round(speed_c, 1), auto_box=round(auto_c, 1))
-    hud.speed_on = True if speed_c >= BOX_ON_MIN else (False if speed_c <= BOX_OFF_MAX else None)
-    hud.auto_on = True if auto_c >= BOX_ON_MIN else (False if auto_c <= BOX_OFF_MAX else None)
+    # 动画、过场里这两个按钮会变暗、白框也不显示，「没有框」不等于「关着」：只在能选动作的阶段才报关，
+    # 其它阶段只有框清楚可见时才报开，否则 None（报错的「关」会让模型去按 b，反而把倍速关掉）
 
     # ---- 阶段和选中
     badges = {}
@@ -557,6 +609,10 @@ def read_battle_hud(image: Image.Image, ocr: Optional[Callable] = None) -> Battl
         hud.phase = PHASE_OTHER  # 没有技能点面板（飞霄专属模式、过场），或有「行动中」状态框
     else:
         hud.phase = None  # 技能点面板在、按钮和状态框都没认出：可能是按钮正在滑入，不下结论
+
+    settled = hud.phase in (PHASE_COMMAND, PHASE_ULT_PENDING)
+    hud.speed_on = _switch_state(speed_c, settled)
+    hud.auto_on = _switch_state(auto_c, settled)
 
     # ---- 终结技圆盘
     slots = []
@@ -602,13 +658,15 @@ def read_battle_hud(image: Image.Image, ocr: Optional[Callable] = None) -> Battl
 
 
 def _read_result(a: np.ndarray, hud: BattleHud, ocr: Optional[Callable]):
-    """结算页：背景很暗、标题区有米黄色文字时，对标题区 OCR 一次。"""
+    """结算页：背景很暗、标题区有米黄色或红色文字时，对标题区 OCR 一次。"""
     left, top, right, bottom = RESULT_TITLE_BOX
     region = a[top:bottom, left:right]
     brightness = float(a[::16, ::16].mean())
-    cream = float(_cream_mask(region.reshape(-1, 3)).mean())
-    hud.debug["result_gate"] = {"brightness": round(brightness, 1), "cream": round(cream, 4)}
-    if brightness > RESULT_MAX_BRIGHTNESS or cream < RESULT_MIN_CREAM:
+    pixels = region.reshape(-1, 3)
+    cream = float(_cream_mask(pixels).mean())
+    red = float(_red_mask(pixels).mean())
+    hud.debug["result_gate"] = {"brightness": round(brightness, 1), "cream": round(cream, 4), "red": round(red, 4)}
+    if brightness > RESULT_MAX_BRIGHTNESS or (cream < RESULT_MIN_CREAM and red < RESULT_MIN_RED):
         return
     try:
         texts = _ocr_texts(ocr or default_ocr, [("title", region)])

@@ -108,6 +108,52 @@ class TestUltimate:
         assert [slot.ult_ready for slot in hud.slots] == [False, False, False]
 
 
+class TestWhiteDisc:
+    """白 / 银色满盘（试用角色的终结技圆盘）：实机上曾经把满盘报成「未满」。"""
+
+    def test_white_full_disc_is_ready_in_command_and_pending(self, read):
+        hud = read("b2_cmd_white_full_disc", sp="5", wave="1/2", rounds="0")
+        assert hud.team_size == 2 and hud.skill_points == 5
+        assert hud.slots[1].ult_ready is True
+        hud = read("b2_ult_pending_white_disc", sp="5")
+        assert hud.phase == "ult_pending" and hud.slots[1].ult_ready is True
+
+    def test_gray_partial_and_empty_discs_are_not_ready(self, read):
+        assert [slot.ult_ready for slot in read("b2_cmd_gray_partial_disc", sp="1").slots] == [False, False]
+        hud = read("b2_cmd_empty_after_ult", sp="5")  # 2 号放完终结技，圆盘空了；1 号淡蓝色盘满了没发光：说不准
+        assert [slot.ult_ready for slot in hud.slots] == [None, False]
+
+    def test_pale_full_blue_disc_without_glow_is_unknown(self, read):
+        # 大黑塔（1 号主演）的淡蓝色液面已经满了但徽记还没发光：说不准，不能报「未满」
+        hud = read("b2_cmd_white_full_disc", sp="5")
+        assert hud.slots[0].ult_ready is None
+
+
+class TestSwitchesOnlyWhenSettled:
+    def test_animation_without_buttons_does_not_claim_off(self, read):
+        # 动画里倍速按钮被盖住 / 变暗：倍速其实开着，不能报「关」（模型会去按 b 把它关掉）
+        hud = read("b2_anim_no_speed_box")
+        assert hud.phase == "other" and hud.speed_on is None and hud.auto_on is None
+
+    def test_animation_with_visible_frame_says_on(self, read):
+        hud = read("b2_anim_speed_box_on")
+        assert hud.phase == "other" and hud.speed_on is True and hud.auto_on is None
+
+    def test_command_phase_reports_off(self, read):
+        hud = read("cmd_basic_sp3_3p", sp="3")
+        assert hud.speed_on is True and hud.auto_on is False
+
+    def test_unsettled_phase_never_reports_off(self, read):
+        for name in ("enemy_turn", "attack_anim", "special_mode", "hud_hidden"):
+            hud = read(name)
+            assert hud.speed_on in (None, True) and hud.auto_on in (None, True), name
+
+    def test_switch_state_function(self):
+        assert bh._switch_state(80, False) is True and bh._switch_state(80, True) is True
+        assert bh._switch_state(-30, True) is False
+        assert bh._switch_state(-30, False) is None and bh._switch_state(30, True) is None
+
+
 class TestOtherPhases:
     @pytest.mark.parametrize("name", ["enemy_turn", "attack_anim", "special_mode", "auto_on_wave1_4p", "auto_on_wave2_4p"])
     def test_animations_and_special_modes_are_other(self, read, name):
@@ -138,6 +184,12 @@ class TestNonBattle:
     def test_result_page(self, read, name):
         hud = read(name, title="挑战结束")
         assert hud.in_battle is False and hud.phase == "result" and hud.result_text == "挑战结束"
+
+    def test_defeat_page_with_red_title(self, read):
+        hud = read("b2_result_defeat", title="战斗失败")
+        assert hud.in_battle is False and hud.phase == "result" and hud.result_text == "战斗失败"
+        assert hud.debug["result_gate"]["red"] >= bh.RESULT_MIN_RED  # 红色标题：米黄色文字几乎没有
+        assert hud.debug["result_gate"]["cream"] < bh.RESULT_MIN_CREAM
 
     def test_result_page_with_other_title_is_not_result(self, read):
         assert read("result_trial", title="下一章").phase is None
@@ -224,18 +276,37 @@ class TestOcrStacking:
 
 class TestUltReadyRules:
     def test_rules(self):
-        glow = {"bright": 0.4, "hue_frac": 0.8, "hue": 185, "disc": 5500, "compact": 0.78}
-        dim_emblem = {"bright": 0.02, "hue_frac": 0.75, "hue": 185, "disc": 5300, "compact": 0.81}
-        full_disc = {"bright": 0.05, "hue_frac": 0.66, "hue": 235, "disc": 5200, "compact": 0.94}
+        plain = {"white": 0.0, "white_mid": 0.0, "white_outside": 0.0, "top": 120, "bottom": 125}
+        glow = dict(plain, bright=0.4, hue_frac=0.8, hue=185, disc=5500, compact=0.78)
+        dim_emblem = dict(plain, bright=0.02, hue_frac=0.75, hue=185, disc=5300, compact=0.81)
+        full_disc = dict(plain, bright=0.05, hue_frac=0.66, hue=235, disc=5200, compact=0.94)
         polluted = dict(full_disc, compact=0.77)  # 背景有大片颜色：不是填满的圆盘
-        half = {"bright": 0.18, "hue_frac": 0.36, "hue": 115, "disc": 3600, "compact": 0.88}
-        in_between = {"bright": 0.1, "hue_frac": 0.5, "hue": 5, "disc": 4500, "compact": 0.9}
+        half = dict(plain, bright=0.18, hue_frac=0.36, hue=115, disc=3600, compact=0.88)
+        in_between = dict(plain, bright=0.1, hue_frac=0.5, hue=5, disc=4500, compact=0.9)
         assert bh._ult_ready(glow) is True
         assert bh._ult_ready(dim_emblem) is False
         assert bh._ult_ready(full_disc) is True
         assert bh._ult_ready(polluted) is None
         assert bh._ult_ready(half) is False
         assert bh._ult_ready(in_between) is None
+        # 白 / 银色盘：中段一整片纯白才是满；只有下沿一块白液面（含扫过的反光）、或背景发白，都不能报满
+        white_full = dict(plain, bright=0.04, hue_frac=0.07, hue=5, disc=600, compact=0.95, white=0.2, white_mid=0.25,
+                          white_outside=0.05)
+        white_partial = dict(white_full, white=0.11, white_mid=0.0)
+        white_flash_bg = dict(white_full, white_outside=0.4)
+        gray_partial = dict(plain, bright=0.04, hue_frac=0.07, hue=5, disc=650, compact=0.96, top=140, bottom=200,
+                            white=0.03)
+        x_overlay = dict(plain, bright=0.12, hue_frac=0.19, hue=235, disc=1346, compact=0.58, white=0.05, white_mid=0.07)
+        pale_full_blue = dict(plain, bright=0.08, hue_frac=0.74, hue=205, disc=5270, compact=0.89)
+        assert bh._ult_ready(white_full) is True
+        assert bh._ult_ready(white_partial) is None
+        assert bh._ult_ready(white_flash_bg) is None
+        assert bh._ult_ready(gray_partial) is False
+        assert bh._ult_ready(x_overlay) is None       # 「禁用」叠加层 + 蓝光：说不准
+        assert bh._ult_ready(pale_full_blue) is None  # 淡蓝色盘满了但没发光：说不准
+        # 没见过的风格（大片彩色、不集中在圆盘里）一律不报「未满」
+        unseen = dict(plain, bright=0.1, hue_frac=0.4, hue=300, disc=3000, compact=0.6)
+        assert bh._ult_ready(unseen) is None
 
 
 # ---------------------------------------------------------------- 文字和图 ----
