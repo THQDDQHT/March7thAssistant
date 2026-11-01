@@ -98,10 +98,10 @@ class TestUltimate:
         assert hud.ult_ready_slots() == [1]
 
     def test_slot_ready_flags(self, read):
-        # 4 人队：1 号主演徽记发光（计数 ≥ 6）、2 号圆盘满；3 号液面不满
+        # 4 人队：1 号主演徽记发光；2 号是粉彩平涂盘填满——实机证明粉彩盘填满只是进度，不是可放，报 False；3 号液面不满
         hud = read("cmd_skill_sp5_4p", sp="5")
         flags = {slot.index: slot.ult_ready for slot in hud.slots}
-        assert flags[1] is True and flags[2] is True and flags[3] is False
+        assert flags[1] is True and flags[2] is False and flags[3] is False
 
     def test_dim_emblem_and_partial_discs_are_not_ready(self, read):
         hud = read("cmd_basic_sp3_3p", sp="3")
@@ -275,38 +275,118 @@ class TestOcrStacking:
 
 
 class TestUltReadyRules:
-    def test_rules(self):
-        plain = {"white": 0.0, "white_mid": 0.0, "white_outside": 0.0, "top": 120, "bottom": 125}
-        glow = dict(plain, bright=0.4, hue_frac=0.8, hue=185, disc=5500, compact=0.78)
-        dim_emblem = dict(plain, bright=0.02, hue_frac=0.75, hue=185, disc=5300, compact=0.81)
-        full_disc = dict(plain, bright=0.05, hue_frac=0.66, hue=235, disc=5200, compact=0.94)
-        polluted = dict(full_disc, compact=0.77)  # 背景有大片颜色：不是填满的圆盘
-        half = dict(plain, bright=0.18, hue_frac=0.36, hue=115, disc=3600, compact=0.88)
-        in_between = dict(plain, bright=0.1, hue_frac=0.5, hue=5, disc=4500, compact=0.9)
+    """规则来自实机按键验证：真满 = 盘的颜色饱和鲜艳 + 中间清楚的白色图标；浅色发白的平涂盘 = 没满。"""
+
+    PLAIN = {"white": 0.0, "white_mid": 0.0, "white_outside": 0.0, "top": 120, "bottom": 125, "vivid": 0.0, "pale": 0.0}
+
+    def stats(self, **kwargs):
+        return dict(self.PLAIN, **kwargs)
+
+    def test_vivid_disc_with_white_icon_is_ready(self):
+        green = self.stats(bright=0.2, hue_frac=0.6, hue=145, disc=5200, compact=0.9, vivid=0.57, pale=0.02, white=0.1, white_mid=0.25)
+        purple = self.stats(bright=0.2, hue_frac=0.5, hue=275, disc=5000, compact=0.9, vivid=0.46, pale=0.23, white=0.09, white_mid=0.2)
+        assert bh._ult_ready(green) is True and bh._ult_ready(purple) is True
+
+    def test_pale_flat_disc_is_not_ready_even_when_filled(self):
+        # 浅色发白的平涂（粉彩）：填满整个圆盘也只是进度，图标很淡、没有白色图标
+        pale_green = self.stats(bright=0.15, hue_frac=0.9, hue=145, disc=5300, compact=0.9, vivid=0.11, pale=0.46)
+        pale_red = self.stats(bright=0.18, hue_frac=0.8, hue=5, disc=5300, compact=0.9, vivid=0.12, pale=0.54)
+        pale_yellow = self.stats(bright=0.1, hue_frac=0.8, hue=55, disc=5000, compact=0.9, vivid=0.11, pale=0.59)
+        assert [bh._ult_ready(x) for x in (pale_green, pale_red, pale_yellow)] == [False, False, False]
+
+    def test_pale_with_unverified_in_between_is_none(self):
+        # 饱和度介于两者之间、又没有白色图标：不报
+        between = self.stats(bright=0.2, hue_frac=0.6, hue=5, disc=5000, compact=0.9, vivid=0.26, pale=0.2)
+        assert bh._ult_ready(between) is None
+
+    def test_cyan_emblem(self):
+        glow = self.stats(bright=0.4, hue_frac=0.8, hue=185, disc=5500, compact=0.78)
+        dim_emblem = self.stats(bright=0.02, hue_frac=0.75, hue=185, disc=5300, compact=0.81)
         assert bh._ult_ready(glow) is True
         assert bh._ult_ready(dim_emblem) is False
-        assert bh._ult_ready(full_disc) is True
-        assert bh._ult_ready(polluted) is None
-        assert bh._ult_ready(half) is False
-        assert bh._ult_ready(in_between) is None
+
+    def test_white_silver_disc(self):
         # 白 / 银色盘：中段一整片纯白才是满；只有下沿一块白液面（含扫过的反光）、或背景发白，都不能报满
-        white_full = dict(plain, bright=0.04, hue_frac=0.07, hue=5, disc=600, compact=0.95, white=0.2, white_mid=0.25,
-                          white_outside=0.05)
+        white_full = self.stats(bright=0.04, hue_frac=0.07, hue=5, disc=600, compact=0.95, white=0.2, white_mid=0.25,
+                                white_outside=0.05)
         white_partial = dict(white_full, white=0.11, white_mid=0.0)
         white_flash_bg = dict(white_full, white_outside=0.4)
-        gray_partial = dict(plain, bright=0.04, hue_frac=0.07, hue=5, disc=650, compact=0.96, top=140, bottom=200,
-                            white=0.03)
-        x_overlay = dict(plain, bright=0.12, hue_frac=0.19, hue=235, disc=1346, compact=0.58, white=0.05, white_mid=0.07)
-        pale_full_blue = dict(plain, bright=0.08, hue_frac=0.74, hue=205, disc=5270, compact=0.89)
+        gray_partial = self.stats(bright=0.04, hue_frac=0.07, hue=5, disc=650, compact=0.96, top=140, bottom=200, white=0.03)
         assert bh._ult_ready(white_full) is True
         assert bh._ult_ready(white_partial) is None
         assert bh._ult_ready(white_flash_bg) is None
         assert bh._ult_ready(gray_partial) is False
+
+    def test_partial_liquid_and_unseen_styles(self):
+        half = self.stats(bright=0.18, hue_frac=0.36, hue=115, disc=3600, compact=0.88)
+        polluted = self.stats(bright=0.05, hue_frac=0.66, hue=235, disc=5200, compact=0.77)
+        x_overlay = self.stats(bright=0.12, hue_frac=0.19, hue=235, disc=1346, compact=0.58, white=0.05, white_mid=0.07)
+        pale_full_blue = self.stats(bright=0.08, hue_frac=0.74, hue=205, disc=5270, compact=0.89)
+        unseen = self.stats(bright=0.1, hue_frac=0.4, hue=300, disc=3000, compact=0.6)
+        assert bh._ult_ready(half) is False           # 干净的彩色液面只填了一块
+        assert bh._ult_ready(polluted) is None        # 背景有大片颜色：不是认得的盘
         assert bh._ult_ready(x_overlay) is None       # 「禁用」叠加层 + 蓝光：说不准
         assert bh._ult_ready(pale_full_blue) is None  # 淡蓝色盘满了但没发光：说不准
-        # 没见过的风格（大片彩色、不集中在圆盘里）一律不报「未满」
-        unseen = dict(plain, bright=0.1, hue_frac=0.4, hue=300, disc=3000, compact=0.6)
-        assert bh._ult_ready(unseen) is None
+        assert bh._ult_ready(unseen) is None          # 没见过的风格（大片彩色、不集中在圆盘里）一律不报「未满」
+
+
+class TestColorfulDiscs:
+    """实机（魂火镇妖封灵帖，4 人队）：按键验证过哪个盘满了。"""
+
+    def test_pale_discs_are_not_ready(self, read):
+        # 按 1 / 按 3 都提示「能量不足」；浅色平涂盘一律没满
+        hud = read("b3_cmd_pale_discs_not_ready", sp="0")
+        assert [slot.ult_ready for slot in hud.slots] == [False, False, False, False]
+
+    def test_vivid_discs_with_white_icons_are_ready_and_pale_one_is_not(self, read):
+        # 1 号绿、2 号紫、3 号红鲜艳有白图标，4 号黄还是浅色平涂
+        hud = read("b3_cmd_vivid_discs_ready", sp="5")
+        assert hud.phase == "command" and hud.selected == "basic"
+        assert [slot.ult_ready for slot in hud.slots] == [True, True, True, False]
+
+    def test_never_calls_a_verified_full_disc_not_ready(self, read):
+        # 待释放的金色盘（4 号确实满了）、白色图标特别大特别亮
+        hud = read("b3_ult_pending_gold", sp="5")
+        assert hud.phase == "ult_pending"
+        assert [slot.ult_ready for slot in hud.slots][1:] == [True, True, True]
+
+    def test_unverified_pastel_disc_is_not_claimed(self, read):
+        hud = read("b3_cmd_yellow_pale_vs_vivid", sp="5")
+        assert hud.slots[0].ult_ready is False and hud.slots[1].ult_ready is True and hud.slots[2].ult_ready is True
+        assert hud.slots[3].ult_ready is not True
+
+
+class TestSpaceLabelWins:
+    """「空格」标签在，就是终结技待释放，优先于 Q/E 徽标；颜色主题不限。"""
+
+    @pytest.mark.parametrize("name", ["b3_ult_pending_purple", "b3_ult_pending_gold", "ult_pending_3p"])
+    def test_pending_in_any_theme(self, read, name):
+        hud = read(name, sp="5")
+        assert hud.phase == "ult_pending" and hud.selected is None
+
+    def test_purple_heal_pending_is_not_command(self, read):
+        # 大按钮是紫色「回复」（目标是我方），按钮边上的圆边曾被当成 E 徽标，报成「选中：战技」
+        hud = read("b3_ult_pending_purple", sp="5")
+        assert hud.phase == "ult_pending" and hud.selected is None and hud.skill_points == 5
+
+    def test_disabled_e_button_with_x_is_not_a_space_label(self, read):
+        # 技能点 0：E 按钮被禁用（带 X），它的深色圆里也有一点米黄色，不是「空格」药丸
+        hud = read("b3_cmd_disabled_e_zero_sp", sp="0")
+        assert hud.phase == "command" and hud.selected == "basic" and hud.skill_points == 0
+
+    def test_e_selected_still_command(self, read):
+        hud = read("b3_cmd_skill_selected_e_big", sp="5")
+        assert hud.phase == "command" and hud.selected == "skill"
+
+
+class TestPauseMenuAndRetreat:
+    def test_pause_menu_is_not_battle(self, read):
+        hud = read("b3_pause_menu")
+        assert hud.in_battle is False and hud.phase is None and hud.selected is None and hud.skill_points is None
+
+    def test_result_after_retreat(self, read):
+        hud = read("b3_result_retreat", title="挑战结束")
+        assert hud.phase == "result" and hud.result_text == "挑战结束"
 
 
 # ---------------------------------------------------------------- 文字和图 ----

@@ -66,7 +66,7 @@ BADGE_CREAM = (0.05, 0.45)  # 下限留宽：JPEG 压缩后小徽标的字母笔
 
 # 终结技待释放：大按钮右上角的「空格」药丸（深底米黄字）
 ULT_PILL = (1762, 784, 1822, 816)
-ULT_PILL_MIN_CREAM = 0.10
+ULT_PILL_MIN_CREAM = 0.17  # 真「空格」药丸 0.21-0.27；被禁用的 E 按钮（带 X）的深色圆里也有 0.12 左右的米黄色
 ULT_PILL_MIN_DARK = 0.40
 
 # 「我方行动中 / 敌方行动中」状态框：深色底 + 白字，在技能点右侧
@@ -97,8 +97,12 @@ ULT_CX0 = 291
 ULT_CY_RANGE = (850, 935)
 ULT_HALF = 42
 ULT_DISC_RADIUS = 44
-ULT_READY_BRIGHT = 0.30      # 亮色像素占比 ≥ 此值：粉彩液面填满或徽记发光
-ULT_FULL_DISC = (4650, 0.85)  # 圆盘范围内有色像素数 ≥ 此值且集中在圆盘里：圆盘被填满
+ULT_READY_BRIGHT = 0.30      # 青色线条徽记：亮色像素占比 ≥ 此值是发光
+ULT_ICON_WHITE = 0.07        # 圆盘中段纯白占比 ≥ 此值：中间有清楚的白色图标
+ULT_BIG_WHITE = 0.20         # 中段纯白占比 ≥ 此值：整个图标又大又白（待释放时盘整个发亮）
+ULT_VIVID_MIN = 0.30         # 鲜艳像素占窗口比例 ≥ 此值：盘的颜色饱和（满盘 0.43-0.58，粉彩盘 ≤ 0.2）
+ULT_PALE_MIN = 0.25          # 浅色平涂像素占比 ≥ 此值（且不鲜艳、没有白色图标）：粉彩的没满盘（0.4-0.6）
+ULT_PALE_MAX_VIVID = 0.22
 ULT_PARTIAL_DISC = 4400      # 有色像素数 ≤ 此值且不亮：只填了一部分 / 灰暗进度环
 ULT_COLOR_PARTIAL_MIN = 2000  # 有色像素数 ≥ 此值（又 ≤ 上面那个）：确实有一块彩色液面，只是没填满；< 此值是灰盘
 ULT_CLEAN_COMPACT = 0.80     # 有色像素集中在圆盘里的比例 ≥ 此值，才相信「液面只填一块」
@@ -106,7 +110,8 @@ ULT_LIQUID_MIN_HUE = 0.20    # 液面的主色相占窗口比例 ≥ 此值
 ULT_CYAN_HUE = (150, 215)    # 主演徽记（青色线条徽记，不是实心圆盘）的色相范围
 ULT_CYAN_DIM = 0.05          # 青色徽记亮色占比 ≤ 此值：暗淡的线条徽记（没满）
 ULT_CYAN_PARTIAL_DISC = 2900  # 青色液面的有色像素数 ≤ 此值：只填了一小块（没满）
-ULT_WHITE_LEVEL = 240        # 「纯白」像素：三个通道都 ≥ 此值
+ULT_VIVID_SAT = 0.5          # 饱和度 ≥ 此值算「鲜艳」
+ULT_WHITE_LEVEL = 232        # 「纯白」像素：三个通道都 ≥ 此值（黄色盘的图标偏奶白，240 会漏）
 # 白 / 银色圆盘：满了是一整盘纯白的徽记（中段纯白占比 ≥ 0.2，圆盘自己的银边会让窗口角上也有一点白，最多到 0.13）；
 # 没满是灰盘加一块下沿的白色液面（含液面上扫过的反光），中段纯白占比是 0。两者差得很远，所以满的阈值取 0.10。
 # 背景发白（过场闪光）时角上的纯白也多，或者窗口里有大片彩色，都不当作满盘。
@@ -421,6 +426,9 @@ def _ult_disc_stats(a: np.ndarray, k: int) -> dict:
     corners = np.concatenate([pure[:10, 10:20].ravel(), pure[:10, -20:-10].ravel(),
                               pure[-10:, 10:20].ravel(), pure[-10:, -20:-10].ravel()])
     stats["white_outside"] = round(float((corners >= ULT_WHITE_LEVEL).mean()), 3)
+    # 颜色浓度：饱和鲜艳的像素（满盘的底色）和浅色发白的平涂像素（没满的粉彩盘）占窗口比例
+    stats["vivid"] = round(float(((sat >= ULT_VIVID_SAT) & (mx >= 150)).mean()), 3)
+    stats["pale"] = round(float(((sat >= 0.12) & (sat < ULT_VIVID_SAT) & (mx >= 190)).mean()), 3)
     stats["top"] = int(mx[8:24, 20:-20].mean())
     stats["bottom"] = int(mx[60:76, 20:-20].mean())
     if total:
@@ -436,27 +444,35 @@ def _ult_disc_stats(a: np.ndarray, k: int) -> dict:
 
 
 def _ult_ready(stats: dict) -> Optional[bool]:
-    """圆盘统计 → 终结技是否可放。能量满时圆盘整个被填满（粉彩、深色实心盘、白 / 银色盘）或徽记发光；
-    没满时是灰暗的进度环 / 液面只填一部分。
+    """圆盘统计 → 终结技是否可放。
 
-    True 要有明确的「满」特征；False 只给确认没满的（灰暗、明显只填一部分，或认得的暗淡徽记）；
-    圆盘风格没见过、判断不了的一律 None——宁可不确定，也不把能放说成不能放。
+    实机验证过的规律（按键后「能量不足」/ 进入待释放，加上用户对着图确认）：
+    - 真满：盘的颜色很饱和、鲜艳，中间是清楚的白色技能图标（外圈还有一圈光）；白 / 银色盘是整盘纯白图标；
+      主演的青色线条徽记是整个发亮。
+    - 没满：浅色、发白的平涂（粉彩），里面的技能图标很淡；灰暗的进度环；液面只填了一块的盘。
+      「盘被填满」本身不代表能放，粉彩盘填满了也只是进度。
+
+    True 要有明确的「满」特征；False 只给确认没满的；没见过的风格、介于两者之间的一律 None——
+    宁可不确定，也不把能放说成不能放（或者反过来）。
     """
-    bright, hue = stats["bright"], stats["hue"]
-    if bright >= ULT_READY_BRIGHT:
-        return True
-    if hue is not None and ULT_CYAN_HUE[0] <= hue <= ULT_CYAN_HUE[1]:
-        # 青色徽记：线条徽记暗淡是没满；液面只填了一小块也是没满。淡蓝色的液面填满、但徽记没有发光，
-        # 是「快满了还是满了」说不准（实机上这种盘之后才会发光），报 None
-        return False if bright <= ULT_CYAN_DIM or stats["disc"] <= ULT_CYAN_PARTIAL_DISC else None
-    if stats["disc"] >= ULT_FULL_DISC[0] and stats["compact"] >= ULT_FULL_DISC[1]:
-        return True
-    if (stats["white_mid"] >= ULT_WHITE_READY[0] and stats["white_outside"] <= ULT_WHITE_READY[1]
-            and stats["disc"] <= ULT_WHITE_READY[2]):
+    hue, wm = stats["hue"], stats["white_mid"]
+    # 鲜艳的盘 + 清楚的白色图标；或者整盘纯白的徽记（白 / 银色盘，几乎没有彩色）；背景在发白（过场闪光）时角上的白也多，不算
+    if wm >= ULT_ICON_WHITE and stats["white_outside"] <= ULT_WHITE_READY[1]:
+        if (stats["vivid"] >= ULT_VIVID_MIN or wm >= ULT_BIG_WHITE
+                or (wm >= ULT_WHITE_READY[0] and stats["disc"] <= ULT_WHITE_READY[2])):
+            return True
+    # 主演的青色线条徽记发光（徽记自己是线条，没有大片白色）
+    if hue is not None and ULT_CYAN_HUE[0] <= hue <= ULT_CYAN_HUE[1] and stats["bright"] >= ULT_READY_BRIGHT and wm < ULT_ICON_WHITE:
         return True
     if stats["white"] > ULT_WHITE_PARTIAL or stats["white_outside"] > ULT_WHITE_PARTIAL:
         return None  # 有不少白但不够「满」，也可能是背景在发白
-    if bright < 0.25:
+    # 浅色发白的平涂盘（图标很淡、没有白色图标）：没满
+    if stats["pale"] >= ULT_PALE_MIN and stats["vivid"] <= ULT_PALE_MAX_VIVID and wm < 0.01:
+        return False
+    if hue is not None and ULT_CYAN_HUE[0] <= hue <= ULT_CYAN_HUE[1]:
+        # 青色线条徽记暗淡是没满；液面只填了一小块也是没满
+        return False if stats["bright"] <= ULT_CYAN_DIM or stats["disc"] <= ULT_CYAN_PARTIAL_DISC else None
+    if stats["bright"] < 0.25:
         if (ULT_COLOR_PARTIAL_MIN <= stats["disc"] <= ULT_PARTIAL_DISC and stats["compact"] >= ULT_CLEAN_COMPACT
                 and stats["hue_frac"] >= ULT_LIQUID_MIN_HUE):
             return False  # 彩色液面只填了一块，圆盘范围里干干净净（背景没有大片颜色）
@@ -594,15 +610,17 @@ def read_battle_hud(image: Image.Image, ocr: Optional[Callable] = None) -> Battl
     big_q, big_e = badges["Ql"][0], badges["El"][0]
     small_q, small_e = badges["Qs"][0], badges["Es"][0]
     pill = pill_cream >= ULT_PILL_MIN_CREAM and pill_dark >= ULT_PILL_MIN_DARK
+    # 「空格」标签优先：终结技待释放时大按钮上方有它（深色药丸 + 米黄字，和按钮的颜色主题无关）；
+    # 这时按钮是终结技的图标，边上会有别的圆形边缘被当成 E 徽标，所以先判它，再看 Q/E 徽标
+    if pill:
+        hud.phase = PHASE_ULT_PENDING
     # 选中的按钮会变大，大徽标位置固定；另一个小按钮的徽标字母细，压缩后容易丢，所以只当佐证记进 debug
-    if big_q and not big_e and has_sp:
+    elif big_q and not big_e and has_sp:
         hud.phase, hud.selected = PHASE_COMMAND, SELECTED_BASIC
         debug["partner_badge"] = small_e
     elif big_e and not big_q and has_sp:
         hud.phase, hud.selected = PHASE_COMMAND, SELECTED_SKILL
         debug["partner_badge"] = small_q
-    elif pill and has_sp and not (big_q or big_e):
-        hud.phase = PHASE_ULT_PENDING
     elif big_q or big_e or small_q or small_e:
         hud.phase = None  # 按钮在变（切换动画）或只认出一部分：不确定
     elif not has_sp or _status_box(a):
