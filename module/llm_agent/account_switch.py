@@ -54,6 +54,7 @@ SLOW_POLL_SECONDS = 2.0
 # 回到主界面后读 UID 的重试次数和间隔（秒）
 UID_CONFIRM_TRIES = 4
 UID_CONFIRM_GAP = 2.0
+UID_CONFIRM_LOOKS = 2  # 连续新帧都唯一识别到目标 UID 才确认，不能拿 tracker 的历史缓存当证据
 # 点了「保留登录记录」那一行之后等单选状态刷新的时间（秒）
 RADIO_SETTLE = 0.5
 
@@ -594,7 +595,7 @@ class AccountSwitcher:
 
     def _target_visible(self) -> bool:
         """当前这张画面左下角能读到目标账号的 UID（不靠 tracker 里可能过时的记录）。"""
-        return self.account.uid in self.tools.tracker._candidates(self.obs)
+        return self.tools.tracker._candidates(self.obs) == [self.account.uid]
 
     # -------------------------------------------------------- 流程 ----
 
@@ -767,14 +768,18 @@ class AccountSwitcher:
         """读左下角 UID，必须等于目标账号（从「点击进入」接上时，账号可能不是目标，这里不对就失败，不会再切一轮）。"""
         tools = self.tools
         self._begin("确认账号")
+        same = 0
         for attempt in range(UID_CONFIRM_TRIES):
             self.obs = tools._take_observation(False)
-            if tools.tracker.confirmed and tools.tracker.uid == self.account.uid:
+            same = same + 1 if self._target_visible() else 0
+            if same >= UID_CONFIRM_LOOKS:
                 self._done(f"左下角 UID 是 {self.account.uid}")
                 return
             if attempt + 1 < UID_CONFIRM_TRIES:
                 tools._sleep(UID_CONFIRM_GAP)
-        self._fail(f"回到主界面了，但左下角读到的账号是「{tools.tracker.describe()}」，不是目标账号")
+        candidates = tools.tracker._candidates(self.obs)
+        current = "、".join(tools.tracker.label(uid) for uid in candidates) if candidates else "未识别到 UID"
+        self._fail(f"回到主界面了，但未能连续确认目标 UID；当前帧左下角：{current}，不是目标账号的稳定确认")
 
     def _ensure_keep_selected(self, dialog: LogoutDialog) -> LogoutDialog:
         """点「退出」之前确认选中的是「保留登录记录」：没选中或判断不了就点一下那一行，再判断一次；还不行点「取消」并中止。"""
@@ -889,6 +894,17 @@ def _run_locked(tools, args: dict, account: Account, started: float) -> "mt.Tool
         reraise_passthrough(e)
         final = switcher.obs
         tools._warn(f"切换账号结束后的观察失败：{tools._safe(e)}")
+    final_uid_uncertain = False
+    if failure is None and final is not None:
+        candidates = tools.tracker._candidates(final)
+        final_uid_uncertain = not candidates
+        if candidates and candidates != [account.uid]:
+            switcher._begin("确认账号")
+            try:
+                switcher._fail("最终观察左下角读到的 UID 与目标账号不一致，不能确认切换成功")
+            except StepFailed as e:
+                failure = str(e)
+                outcome = ""
     elapsed = round(tools._clock() - started, 1)
     ok = failure is None
     extra = {"target_uid": account.uid, "steps": switcher.steps, "outcome": outcome or failure,
@@ -907,6 +923,8 @@ def _run_locked(tools, args: dict, account: Account, started: float) -> "mt.Tool
         label, advice = KIND_HINTS[kind]
         head = (f"【切换账号失败】停在「{switcher._step_name}」：{failure}\n"
                 f"现在的画面大概是：{label}。{advice}。{GENERIC_ADVICE}\n已走的步骤：{steps}")
+    if ok and final_uid_uncertain:
+        head += "\n最终附图未识别到 UID；目标账号已在流程内的新截图中核验，附图中的账号暂不确定。"
     if final is None:
         return mt.ToolOutput(head)
     return tools._observation_output(final, head)

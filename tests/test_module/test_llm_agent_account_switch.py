@@ -582,6 +582,83 @@ class TestAlreadyCurrent:
         assert env.world.clicks == [] and env.auto.calls == [] and env.world.change_calls == []
         assert env.records()[0]["result"]["message"] == "已经是这个号"
 
+    def test_stale_target_cache_without_visible_uid_does_not_skip_switch(self, tmp_path):
+        env = Env(tmp_path, World(final_uid=""))
+        env.tools.tracker.update(build_obs([(f"UID:{UID_B}", 97, 1052)]))
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == HAPPY_CLICKS
+        assert "当前已经是「账号乙」" not in out.text
+        assert env.records()[0]["result"]["ok"] is False
+
+    def test_visible_target_overrides_stale_other_account_cache(self, env):
+        env.tools.tracker.update(build_obs([(f"UID:{UID_B}", 97, 1052)]))
+        out = env.tools.switch_account("账号甲")
+        assert "当前已经是「账号甲」" in out.text
+        assert env.world.clicks == [] and env.auto.calls == []
+
+
+class TestUidVerification:
+    @pytest.mark.parametrize("final_uid", ["", UID_A, UID_C])
+    def test_resume_does_not_confirm_using_stale_target_cache(self, tmp_path, final_uid):
+        env = Env(tmp_path, World(final_uid=final_uid))
+        env.tools.tracker.update(build_obs([(f"UID:{UID_B}", 97, 1052)]))
+        env.world.go("click_enter")
+        env.world.selected_uid = UID_A
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["click_enter"]
+        assert "【切换账号失败】停在「确认账号」" in out.text
+        assert "已切换到「账号乙」" not in out.text
+        assert env.records()[0]["result"]["ok"] is False
+        if not final_uid:
+            assert env.tools.tracker.confirmed and env.tools.tracker.uid == UID_B
+            assert "当前帧左下角：未识别到 UID" in out.text
+
+    @pytest.mark.parametrize("interruption", ["", UID_A])
+    def test_confirmation_requires_consecutive_fresh_target_frames(self, env, interruption):
+        # 间隔出现一张目标帧会更新 tracker，但不能靠缓存把下一张空白/其他账号帧当成确认。
+        reads = iter([UID_B, interruption, UID_B, interruption])
+
+        def observe(grid):
+            uid = next(reads)
+            return build_obs([(f"UID:{uid}", 97, 1052)] if uid else [])
+
+        env.tools._observer = observe
+        switcher = sw.AccountSwitcher(env.tools, sw.Account(UID_B, "账号乙", MASK_B))
+        with pytest.raises(sw.StepFailed, match="未能连续确认目标 UID"):
+            switcher._s_verify(None)
+        assert switcher.steps[-1]["ok"] is False
+
+    @pytest.mark.parametrize("final_uid", ["", UID_A])
+    def test_final_picture_uid_is_checked_after_successful_verification(self, tmp_path, final_uid):
+        env = Env(tmp_path)
+        env.world.go("click_enter")
+        env.world.selected_uid = UID_B
+        observe = env.world.observation
+        main_reads = 0
+
+        def final_picture(grid):
+            nonlocal main_reads
+            obs = observe()
+            if env.world.state == "main":
+                main_reads += 1
+                if main_reads > sw.UID_CONFIRM_LOOKS:
+                    return build_obs([(f"UID:{final_uid}", 97, 1052)] if final_uid else [])
+            return obs
+
+        env.tools._observer = final_picture
+        out = env.tools.switch_account("账号乙")
+        assert main_reads == sw.UID_CONFIRM_LOOKS + 1
+        assert env.world.names() == ["click_enter"]
+        if final_uid:
+            assert "最终观察左下角读到的 UID 与目标账号不一致" in out.text
+            assert "已切换到「账号乙」" not in out.text
+            assert env.records()[0]["result"]["ok"] is False
+            assert "最终观察左下角读到的 UID 与目标账号不一致" in env.records()[0]["outcome"]
+        else:
+            assert "已切换到「账号乙」" in out.text
+            assert "最终附图未识别到 UID" in out.text
+            assert env.records()[0]["result"]["ok"] is True
+
 
 class TestRefusals:
     def test_unknown_account(self, env):
