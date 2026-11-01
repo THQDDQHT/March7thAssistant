@@ -170,6 +170,11 @@ class _Action:
         observation = self.observe(full=True)
         if not self.eligible(observation, phase, selected):
             raise StopAction("输入前状态已变化或自动状态不确定；停止发送按键")
+        desired = {"q": bh.SELECTED_BASIC, "e": bh.SELECTED_SKILL}.get(key)
+        if desired is not None and observation.hud.selected == desired:
+            # 实机：对已经选中的 Q/E 再按一次会直接出手，不能把它当作幂等的选择键。
+            self.note("selection_skipped", key=key, reason="输入前新图确认已选中")
+            return observation
         if self.action == "ultimate" and key != "space":
             hud = observation.hud
             if next((item.ult_ready for item in hud.slots if item.index == self.slot), None) is False:
@@ -250,7 +255,10 @@ class _Action:
                 confirmed = self.press("space", bh.PHASE_ULT_PENDING)
             else:
                 selected = bh.SELECTED_BASIC if self.action == "basic" else bh.SELECTED_SKILL
-                self.press("q" if self.action == "basic" else "e", bh.PHASE_COMMAND)
+                if initial.hud.selected != selected:
+                    self.press("q" if self.action == "basic" else "e", bh.PHASE_COMMAND)
+                else:
+                    self.note("selection_skipped", key="q" if self.action == "basic" else "e", reason="初始稳定画面已选中")
                 self.stable(bh.PHASE_COMMAND, selected, selection=True)
                 confirmed = self.press("space", bh.PHASE_COMMAND, selected)
             message = self.wait_after_confirm(confirmed)
@@ -264,7 +272,7 @@ class _Action:
             if self.confirm_attempted:
                 summary = "【执行结果不确定】已经尝试发送一次空格确认；" + reason + "。动作可能已执行，禁止盲目重试；先用 battle_state/observe 核实。"
             elif self.selection_attempted:
-                summary = "【未确认出手】" + reason + "。选择键可能已生效，先核实当前画面。"
+                summary = "【未发空格】" + reason + "。选择键也可能已触发动作；禁止盲目重试，先用 battle_state/observe 核实当前画面。"
             else:
                 summary = "【未执行】" + reason + "。"
             if self.after is None:

@@ -22,7 +22,7 @@ def hud(phase=bh.PHASE_COMMAND, selected=bh.SELECTED_BASIC, sp=3, ready=True, au
 class Arena:
     def __init__(self, tmp_path, monkeypatch):
         self.now = 0.0
-        self.current = hud()
+        self.current = hud(selected=None)
         self.texts = []
         self.keys = []
         self.looks = 0
@@ -77,7 +77,12 @@ class Arena:
 
     def default_press(self, key):
         if key in ("q", "e"):
-            self.current = hud(selected="basic" if key == "q" else "skill", sp=self.current.skill_points)
+            desired = "basic" if key == "q" else "skill"
+            if self.current.selected == desired:
+                # 实机重复按已经选中的技能键会直接出手，不能假设 Q/E 只是选择。
+                self.after_frames = [hud(bh.PHASE_OTHER), hud(), hud()]
+            else:
+                self.current = hud(selected=desired, sp=self.current.skill_points)
         elif key in ("1", "2", "3", "4"):
             self.current = hud(bh.PHASE_ULT_PENDING)
         elif key == "space":
@@ -109,10 +114,33 @@ def test_select_verify_confirm_wait_and_log(arena, action, key):
     assert [item["key"] for item in data["trace"] if item["event"] == "key_attempt"] == [key, "space"]
 
 
+@pytest.mark.parametrize("action", ["basic", "skill"])
+def test_already_selected_skill_only_sends_space(arena, action):
+    arena.current = hud(selected=action)
+    out = arena.act(action)
+    assert "已观察完成" in out.text
+    assert arena.keys == ["space"]  # 重按 Q/E 在替身中也会直接出手，必须完全跳过
+    assert not arena.record()["selection_attempted"]
+    assert any(item["event"] == "selection_skipped" for item in arena.record()["trace"])
+
+
+@pytest.mark.parametrize("action", ["basic", "skill"])
+def test_fresh_snapshot_already_selected_skips_selection_key(arena, action):
+    arena.current = hud(selected="skill" if action == "basic" else "basic")
+    def observe():
+        if arena.full_looks == 1:
+            arena.current = hud(selected=action)
+    arena.on_observe = observe
+    assert "已观察完成" in arena.act(action).text
+    assert arena.keys == ["space"]
+    skips = [item for item in arena.record()["trace"] if item["event"] == "selection_skipped"]
+    assert skips[0]["reason"] == "输入前新图确认已选中"
+
+
 def test_swallowed_selection_must_never_confirm(arena):
     arena.on_press = lambda key: ActionResult(True, "吞键但报告成功")
     out = arena.act("skill", timeout_seconds=12)
-    assert arena.keys == ["e"] and "未确认出手" in out.text
+    assert arena.keys == ["e"] and "未发空格" in out.text
     assert "未获核实" in out.text
 
 
@@ -121,7 +149,9 @@ def test_selection_lost_to_animation_cannot_confirm_next_turn(arena):
         arena.after_frames = [hud(bh.PHASE_OTHER), hud(selected="skill"), hud(selected="skill")]
         return ActionResult(True, "已发键")
     arena.on_press = press
-    assert "离开普通指令" in arena.act("skill").text
+    text = arena.act("skill").text
+    assert "离开普通指令" in text and "未发空格" in text
+    assert "选择键也可能已触发动作" in text and "禁止盲目重试" in text
     assert arena.keys == ["e"]
 
 
@@ -191,7 +221,7 @@ def test_ultimate_no_pending_distinguishes_observed_energy_message_from_unknown(
         return ActionResult(True, "输入无变化")
     arena.on_press = press
     text = arena.act("ultimate", slot=2, timeout_seconds=12).text
-    assert arena.keys == ["2"] and "未确认出手" in text
+    assert arena.keys == ["2"] and "未发空格" in text
     assert ("能量不足" in text) is toast
     if not toast:
         assert "输入未生效" in text
@@ -207,7 +237,7 @@ def test_special_phase_or_hidden_hud_never_gets_space(arena, phase):
 def test_initial_hidden_animation_waits_for_stable_command(arena):
     arena.after_frames = [bh.BattleHud(in_battle=False), hud(bh.PHASE_OTHER), hud(), hud()]
     assert "已观察完成" in arena.act().text
-    assert arena.keys == ["q", "space"]
+    assert arena.keys == ["space"]
 
 
 def test_hidden_hud_after_confirm_is_not_battle_end(arena):
