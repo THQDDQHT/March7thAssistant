@@ -19,7 +19,7 @@ import os
 import sys
 import threading
 from logging.handlers import RotatingFileHandler
-from typing import Annotated, Any, Callable, List, Optional, Union
+from typing import Annotated, Any, Callable, List, Literal, Optional, Union
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
@@ -130,6 +130,18 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
           "战斗里每次按键后用它确认状态，比 observe 快也准；读不准的字段会写「不确定」。")
     async def battle_state():
         return await call(tools.battle_state)
+
+    @tool("单次手动战斗出手：basic 普攻、skill 战技、ultimate 指定 1–4 号位终结技（必须给 slot）；"
+          "confirm_pending 仅显式确认画面上已有的终结技待释放。只作用于游戏当前目标，不识别行动者/目标身份，不切自动或倍速。"
+          "必须稳定识别可输入且自动明确关闭；核实选中后最多按一次空格，随后只观察至下次稳定可输入或结算。"
+          "OTHER 动画/角色特殊阶段不会随便确认，已有终结技待释放不会用 Q/E 取消。终结技能量不确定只尝试一次序号。"
+          "返回新 HUD 图、按键轨迹；超时或确认后无执行证据会报执行结果不确定，禁止盲重试，先 battle_state/observe 核实。")
+    async def battle_act(
+        action: Annotated[Literal["basic", "skill", "ultimate", "confirm_pending"], Field(description="动作类型；confirm_pending 仅用于核实当前目标后显式确认已有终结技")],
+        slot: Annotated[Optional[int], Field(ge=1, le=4, description="仅 ultimate 必填，队伍从左到右 1–4；其余动作不传")] = None,
+        timeout_seconds: Annotated[float, Field(ge=5, le=45, description="整个闭环最长秒数，5–45；超时后不补按")] = 25,
+    ):
+        return await call(tools.battle_act, action, slot, timeout_seconds)
 
     @tool("点击最近一次观察里编号为 id 的元素。会过护栏（危险词、确认类按钮）。执行后自动返回新画面。")
     async def click(id: Annotated[int, Field(description="元素表里的编号")]):

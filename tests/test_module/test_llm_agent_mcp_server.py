@@ -16,7 +16,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
-EXPECTED_TOOLS = sorted("""observe battle_state click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
+EXPECTED_TOOLS = sorted("""observe battle_state battle_act click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
     run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user record_progress get_progress list_characters get_m7a_config set_m7a_config switch_account""".split())
 
 
@@ -111,6 +111,10 @@ class TestRegistration:
         assert by_name["click"].inputSchema["required"] == ["id"]
         assert by_name["click"].inputSchema["properties"]["id"]["type"] == "integer"
         assert by_name["press_key"].inputSchema["properties"]["hold_seconds"]["default"] == 0
+        battle_schema = by_name["battle_act"].inputSchema
+        assert battle_schema["required"] == ["action"]
+        assert battle_schema["properties"]["action"]["enum"] == ["basic", "skill", "ultimate", "confirm_pending"]
+        assert battle_schema["properties"]["timeout_seconds"]["maximum"] == 45
         assert by_name["press_keys"].inputSchema["required"] == ["keys"]
         assert by_name["press_keys"].inputSchema["properties"]["keys"]["type"] == "array"
         assert by_name["press_keys"].inputSchema["properties"]["gap_seconds"]["default"] == 0.3
@@ -159,6 +163,7 @@ class TestRegistration:
             await mcp.call_tool("get_progress", {})
             await mcp.call_tool("get_progress", {"max_chars": 1000})
             await mcp.call_tool("switch_account", {"account": "账号甲"})
+            await mcp.call_tool("battle_act", {"action": "ultimate", "slot": 2})
 
         asyncio.run(run())
         assert tools.calls == [
@@ -167,7 +172,7 @@ class TestRegistration:
             ("resolve_todo", ("活动", "")), ("get_m7a_config", (["forgottenhall_level"],)), ("get_m7a_config", ([],)),
             ("set_m7a_config", ("forgottenhall_level", [1, 12])), ("set_m7a_config", ("forgottenhall_enable", True)),
             ("list_characters", ()), ("record_progress", ("日常做完",)), ("get_progress", (4000,)), ("get_progress", (1000,)),
-            ("switch_account", ("账号甲",))]
+            ("switch_account", ("账号甲",)), ("battle_act", ("ultimate", 2, 25))]
 
     def test_text_only_tool(self):
         mcp = ms.create_mcp(FakeTools())

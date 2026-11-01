@@ -1246,6 +1246,11 @@ class McpTools:
         except ToolBusy as e:
             return ToolOutput(f"【未执行】{e}")
 
+    def battle_act(self, action, slot=None, timeout_seconds=25) -> ToolOutput:
+        """单次战斗出手闭环，完整实现见 battle_act.py。"""
+        from module.llm_agent.battle_act import run
+        return run(self, action, slot, timeout_seconds)
+
     def _screenshot(self):
         """只截图（不 OCR）。注入了 observer（离线、测试）时用它的图。"""
         if self._observer is not None:
