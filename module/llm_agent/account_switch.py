@@ -47,6 +47,9 @@ WAIT_AFTER_ENTER = 30.0
 WAIT_CLICK_ENTER = 90.0  # 开始游戏后加载，约 15–30 秒
 WAIT_MAIN = 90.0
 POLL_SECONDS = 1.0
+# 下拉列表展开、登录框切换号码有动画：连续这么多次观察的结果一样才算稳定，两次观察之间隔 STABLE_GAP 秒
+STABLE_LOOKS = 2
+STABLE_GAP = 1.0
 SLOW_POLL_SECONDS = 2.0
 # 回到主界面后读 UID 的重试次数和间隔（秒）
 UID_CONFIRM_TRIES = 4
@@ -202,6 +205,10 @@ class Dropdown:
 
 class StepFailed(Exception):
     """某一步没有走通；流程立刻停下。"""
+
+
+class AlreadyCurrent(Exception):
+    """中途发现当前账号已经是目标账号（已经处理完画面），流程直接结束。"""
 
 
 # ---------------------------------------------------------------- 手机号 ----
@@ -550,111 +557,221 @@ class AccountSwitcher:
         if not result.ok:
             self._fail(result.message)
 
+    # -------------------------------------------------------- 稳定等待 ----
+
+    def _wait_stable(self, finder: Callable[[Observation], object], signature: Callable, timeout: float, what: str,
+                     seed=None, need: int = STABLE_LOOKS, interval: float = STABLE_GAP):
+        """等 finder 认出预期画面，并且连续 need 次观察的 signature 完全一样才返回（避开展开、切换时的动画中间帧）。
+
+        seed 是已经看到的一次结果（算第一次）。中间有一次认不出就重新计数；超时或总时长用完就停，不补点。
+        """
+        deadline = self.tools._clock() + min(timeout, max(self._remaining(), 0))
+        found = seed if seed is not None else finder(self._look())
+        last = signature(found) if found else None
+        same = 1 if found else 0
+        while not (found and same >= need):
+            if self._remaining() <= 0:
+                self._fail(f"整个流程已超过 {TOTAL_TIMEOUT:g} 秒，停止（还在等：{what}）")
+            if self.tools._clock() >= deadline:
+                self._fail(f"{timeout:g} 秒内没等到「{what}」" + ("稳定下来（画面一直在变）" if found else ""))
+            self.tools._sleep(interval)
+            found = finder(self._look())
+            if not found:
+                last, same = None, 0
+                continue
+            current = signature(found)
+            same = same + 1 if current == last else 1
+            last = current
+        return found
+
+    @staticmethod
+    def _box_signature(box: LoginBox):
+        return (box.mask.prefix[:2], box.mask.suffix) if box.mask else None
+
+    @staticmethod
+    def _rows_signature(dropdown: Dropdown):
+        return tuple((row.mask.prefix[:2], row.mask.suffix) for row in dropdown.rows)
+
+    def _target_visible(self) -> bool:
+        """当前这张画面左下角能读到目标账号的 UID（不靠 tracker 里可能过时的记录）。"""
+        return self.account.uid in self.tools.tracker._candidates(self.obs)
+
     # -------------------------------------------------------- 流程 ----
 
     def run(self) -> str:
-        """走完整个流程，返回成功说明；任何一步失败抛 StepFailed。"""
-        tools, account = self.tools, self.account
-        target_uid = account.uid
+        """走完整个流程，返回成功说明；任何一步失败抛 StepFailed。
 
-        # 1. 当前画面和账号
+        先看当前画面决定从哪一步接着走（中途停下的流程可以继续）：每个 _s_* 步骤接收「这一步要点的东西」，
+        点完后等下一步的画面出现，把它交给下一步。流程是线性的、不回头，所以不会死循环。
+        """
+        tools = self.tools
         self._begin("确认当前画面和账号")
         self.first_obs = self.obs = tools._take_observation(False)
-        before_uid = tools.tracker.uid if tools.tracker.confirmed else None
-        if before_uid == target_uid:
-            self._done("当前已经是目标账号")
+        kind = classify(self.obs)
+        label = KIND_HINTS[kind][0]
+        if kind in (KIND_UNKNOWN, KIND_PHONE_MENU) and self._target_visible():
+            detail = "当前已经是目标账号"
+            if kind == KIND_PHONE_MENU:  # 手机菜单里也看得到左下角 UID：把菜单关掉
+                result = tools.executor.press("esc", 0)
+                detail += "，已按 esc 关闭手机菜单" + ("" if result.ok else "（关闭失败）")
+            self._done(detail)
             return "已经是这个号"
-        self._done(f"当前账号：{tools.tracker.describe()}；画面：{KIND_HINTS[classify(self.obs)][0]}")
+        self._done(f"当前账号：{tools.tracker.describe()}；画面：{label}")
 
-        # 2. 手机菜单 → 电源图标
+        stage, found = self._pick_start(kind)
+        order = [self._s_open_menu, self._s_power, self._s_confirm, self._s_logout, self._s_exit, self._s_select, self._s_enter,
+                 self._s_start, self._s_click_enter, self._s_verify]
+        for step in order[order.index(stage):]:
+            found = step(found)
+        return "切换成功"
+
+    def _pick_start(self, kind: str):
+        """按当前画面选起点，返回 (从哪一步开始, 这一步要点的东西)。"""
+        obs = self.obs
+        if kind == KIND_PHONE_MENU:
+            return self._s_power, find_phone_menu(obs)
+        if kind == KIND_BACK_DIALOG:
+            return self._s_confirm, find_back_dialog(obs)
+        if kind == KIND_LOGIN_PAGE:
+            # 登录页有两种：还没登出，或者已经选好号回到了登录页。分不出来，一律从「登出」走：
+            # 登出后回到登录框，重新读号、选号，线性往下走，不会兜圈
+            return self._s_logout, find_login_page(obs)
+        if kind == KIND_LOGOUT_DIALOG:
+            return self._s_exit, find_logout_dialog(obs)
+        if kind == KIND_LOGIN_BOX:
+            return self._s_select, find_login_box(obs)
+        if kind == KIND_DROPDOWN:
+            return self._s_select, find_dropdown(obs)
+        if kind == KIND_CLICK_ENTER:
+            return self._s_click_enter, find_click_enter(obs)
+        if kind in (KIND_WARNING, KIND_LOADING):
+            self._begin("确认当前画面和账号")
+            self._fail(f"游戏正在加载（{KIND_HINTS[kind][0]}），不知道加载的是哪一步，先别动；等加载完看到登录页或主界面再试")
+        return self._s_open_menu, None
+
+    def _s_open_menu(self, _):
+        """主界面（或 M7A 认得的其它界面）→ 手机菜单，返回电源图标。"""
+        tools = self.tools
         self._begin("打开手机菜单")
-        power = find_phone_menu(self.obs)
-        if power is None:
-            screen_id, screen_name = tools._last_screen
-            if not screen_id:
-                self._fail(f"当前画面是{KIND_HINTS[classify(self.obs)][0]}，不是主界面也不是手机菜单；"
-                           f"先用 goto_screen(main) 回到主界面再试")
-            try:
-                tools.screen.change_to("menu")
-            except Exception as e:
-                reraise_passthrough(e)
-                self._fail(f"从「{screen_name}」跳转到手机菜单失败：{tools._safe(e)}")
-            power = self._wait_for(find_phone_menu, WAIT_MENU, "手机菜单（右下角电源图标）")
+        screen_id, screen_name = tools._last_screen
+        if not screen_id:
+            self._fail(f"当前画面是{KIND_HINTS[classify(self.obs)][0]}，不是主界面也不是手机菜单；"
+                       f"先用 goto_screen(main) 回到主界面再试")
+        try:
+            tools.screen.change_to("menu")
+        except Exception as e:
+            reraise_passthrough(e)
+            self._fail(f"从「{screen_name}」跳转到手机菜单失败：{tools._safe(e)}")
+        power = self._wait_for(find_phone_menu, WAIT_MENU, "手机菜单（右下角电源图标）")
         tools.tracker.update(self.obs)
-        if tools.tracker.confirmed and tools.tracker.uid == target_uid:
-            result = tools.executor.press("esc", 0)  # 手机菜单里也看得到左下角 UID：其实已经是目标账号，把菜单关掉
+        if self._target_visible():
+            result = tools.executor.press("esc", 0)  # 其实已经是目标账号，把菜单关掉
             self._done("手机菜单里发现已经是目标账号，已按 esc 关闭菜单" + ("" if result.ok else "（关闭失败）"))
-            return "已经是这个号"
+            raise AlreadyCurrent()
         self._done()
+        return power
 
+    def _s_power(self, power):
+        """点电源图标 → 「是否返回登录页面」弹窗。"""
         self._begin("点电源图标")
         self._click(power, "电源图标", right_strip=True)
         dialog = self._wait_for(find_back_dialog, WAIT_DIALOG, "弹窗「是否返回登录页面？」")
         self._done()
+        return dialog
 
-        # 3. 确认 → 登录页
+    def _s_confirm(self, dialog):
+        """点「确认」→ 登录页（带「登出」）。"""
         self._begin("确认返回登录页面")
         self._click(dialog.confirm, "确认")
         page = self._wait_for(lambda o: (p := find_login_page(o)) and p.logout and p, WAIT_LOGIN_PAGE,
                               "登录页（开始游戏 + 右侧的登出）", SLOW_POLL_SECONDS)
         self._done()
+        return page
 
-        # 4. 登出 → 「退出登录」弹窗
+    def _s_logout(self, page):
+        """点「登出」→ 「退出登录」弹窗。"""
         self._begin("点登出")
+        if not page.logout:  # 从中途接上时登录页可能还没把「登出」画出来
+            page = self._wait_for(lambda o: (p := find_login_page(o)) and p.logout and p, WAIT_LOGIN_PAGE,
+                                  "登录页（开始游戏 + 右侧的登出）", SLOW_POLL_SECONDS)
         self._click(page.logout, "登出", right_strip=True)
-        logout = self._wait_for(find_logout_dialog, WAIT_DIALOG, "弹窗「退出登录」")
+        dialog = self._wait_for(find_logout_dialog, WAIT_DIALOG, "弹窗「退出登录」")
         self._done()
+        return dialog
 
-        # 5. 确认选的是「保留登录记录」，再点退出
+    def _s_exit(self, dialog):
+        """确认选的是「保留登录记录」，点「退出」→ 登录框（号码稳定读到）。"""
         self._begin("确认保留登录记录并退出")
-        logout = self._ensure_keep_selected(logout)
-        self._click(logout.exit, "退出（弹窗按钮）")
-        box = self._wait_for(lambda o: (b := find_login_box(o)) and b.mask and b, WAIT_LOGIN_BOX,
-                             "登录框（下拉框里能读到当前号码）")
+        dialog = self._ensure_keep_selected(dialog)
+        self._click(dialog.exit, "退出（弹窗按钮）")
+        box = self._wait_stable(lambda o: (b := find_login_box(o)) and b.mask and b, self._box_signature,
+                                WAIT_LOGIN_BOX, "登录框（下拉框里能读到当前号码）")
         self._done(f"登录框当前号码：{box.mask}")
+        return box
 
-        # 6. 选号
+    def _s_select(self, found):
+        """登录框里选目标账号，返回显示着目标号码的登录框。found 是登录框，或者（从展开的列表接上时）下拉列表。"""
         self._begin("在登录框里选目标账号")
-        if masks_match(box.mask, self.target):
-            self._done(f"登录框当前就是目标号码 {self.target}，不用展开列表")
-        else:
+        if isinstance(found, LoginBox):
+            box = self._wait_stable(lambda o: (b := find_login_box(o)) and b.mask and b, self._box_signature,
+                                    WAIT_LOGIN_BOX, "登录框（下拉框里能读到当前号码）", seed=found if found.mask else None)
+            if masks_match(box.mask, self.target):
+                self._done(f"登录框当前就是目标号码 {self.target}，不用展开列表")
+                return box
             self._click(box.arrow, "下拉箭头")
-            dropdown = self._wait_for(find_dropdown, WAIT_DROPDOWN, "展开的账号下拉列表")
-            matches = [row for row in dropdown.rows if masks_match(row.mask, self.target)]
-            if not matches:
-                shown = "、".join(str(row.mask) for row in dropdown.rows)
-                self._fail(f"账号列表里没有目标号码 {self.target}（列表里是：{shown}）；不点「登录其他账号」，"
-                           f"请用 leave_for_user 留给用户")
-            if len(matches) > 1:
-                self._fail(f"账号列表里有 {len(matches)} 行都像目标号码 {self.target}，分不清，不点；请用 leave_for_user 留给用户")
-            self._click(matches[0].hit, f"号码 {matches[0].mask}", x_max=LIST_CLICK_X_MAX)
-            box = self._wait_for(lambda o: (b := find_login_box(o)) and b.mask and masks_match(b.mask, self.target) and b,
-                                 WAIT_DROPDOWN, f"登录框显示目标号码 {self.target}")
-            self._done(f"已选中 {box.mask}")
+            found = self._wait_for(find_dropdown, WAIT_DROPDOWN, "展开的账号下拉列表")
+        # 展开有动画：连续两次看到一样的行才拿来判断；目标不在里面时再等一轮确认
+        dropdown = self._wait_stable(find_dropdown, self._rows_signature, WAIT_DROPDOWN, "账号下拉列表", seed=found)
+        matches = self._matches(dropdown)
+        if not matches:
+            dropdown = self._wait_stable(find_dropdown, self._rows_signature, WAIT_DROPDOWN, "账号下拉列表", seed=dropdown)
+            matches = self._matches(dropdown)
+        if not matches:
+            shown = "、".join(str(row.mask) for row in dropdown.rows)
+            self._fail(f"账号列表里没有目标号码 {self.target}（列表里是：{shown}）；不点「登录其他账号」，请用 leave_for_user 留给用户")
+        if len(matches) > 1:
+            self._fail(f"账号列表里有 {len(matches)} 行都像目标号码 {self.target}，分不清，不点；请用 leave_for_user 留给用户")
+        self._click(matches[0].hit, f"号码 {matches[0].mask}", x_max=LIST_CLICK_X_MAX)
+        box = self._wait_stable(lambda o: (b := find_login_box(o)) and b.mask and masks_match(b.mask, self.target) and b,
+                                self._box_signature, WAIT_DROPDOWN, f"登录框显示目标号码 {self.target}")
+        self._done(f"已选中 {box.mask}")
+        return box
 
-        # 7. 进入游戏 → 登录页 → 开始游戏 → 点击进入
+    def _matches(self, dropdown: Dropdown) -> List[Row]:
+        return [row for row in dropdown.rows if masks_match(row.mask, self.target)]
+
+    def _s_enter(self, box):
+        """点「进入游戏」→ 登录页（开始游戏）。"""
         self._begin("点进入游戏")
         self._click(box.enter, "进入游戏")
         page = self._wait_for(find_login_page, WAIT_AFTER_ENTER, "登录页（开始游戏）", SLOW_POLL_SECONDS)
         self._done()
+        return page
 
+    def _s_start(self, page):
+        """点「开始游戏」→「点击进入」页。"""
         self._begin("点开始游戏")
         self._click(page.start, "开始游戏")
         enter = self._wait_for(find_click_enter, WAIT_CLICK_ENTER, "「点击进入」页", SLOW_POLL_SECONDS)
         self._done()
+        return enter
 
+    def _s_click_enter(self, enter):
+        """点「点击进入」→ 主界面。"""
         self._begin("点击进入")
         self._click(enter, "点击进入")
         self._wait_for_main()
         self._done()
 
-        # 8. 确认账号
+    def _s_verify(self, _):
+        """读左下角 UID，必须等于目标账号（从「点击进入」接上时，账号可能不是目标，这里不对就失败，不会再切一轮）。"""
+        tools = self.tools
         self._begin("确认账号")
         for attempt in range(UID_CONFIRM_TRIES):
             self.obs = tools._take_observation(False)
-            if tools.tracker.confirmed and tools.tracker.uid == target_uid:
-                self._done(f"左下角 UID 是 {target_uid}")
-                return "切换成功"
+            if tools.tracker.confirmed and tools.tracker.uid == self.account.uid:
+                self._done(f"左下角 UID 是 {self.account.uid}")
+                return
             if attempt + 1 < UID_CONFIRM_TRIES:
                 tools._sleep(UID_CONFIRM_GAP)
         self._fail(f"回到主界面了，但左下角读到的账号是「{tools.tracker.describe()}」，不是目标账号")
@@ -755,6 +872,8 @@ def _run_locked(tools, args: dict, account: Account, started: float) -> "mt.Tool
     outcome = ""
     try:
         outcome = switcher.run()
+    except AlreadyCurrent:
+        outcome = "已经是这个号"
     except StepFailed as e:
         failure = str(e)
     except Exception as e:

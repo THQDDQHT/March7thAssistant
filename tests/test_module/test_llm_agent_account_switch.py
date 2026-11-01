@@ -109,7 +109,7 @@ class World:
 
     def __init__(self, uid=UID_A, mask=MASK_A, others=((UID_B, MASK_B),), *, keep_state=True, clear_state=False,
                  radio_fixed=None, first_login_mask=None, click_enter_to="main", final_uid=None, stuck=None,
-                 dropdown_rows=None, ocr_box_mask=None):
+                 dropdown_rows=None, ocr_box_mask=None, dropdown_anim=0, box_first_look_mask=None, no_logout_looks=0):
         self.state = "main"
         self.uid, self.mask = uid, mask
         self.accounts = {uid: mask}
@@ -122,6 +122,9 @@ class World:
         self.stuck = stuck  # 卡在这个画面不再自动前进
         self.dropdown_rows = dropdown_rows  # 下拉列表里显示的号码（默认是所有已登录的号）
         self.ocr_box_mask = ocr_box_mask  # OCR 把号码认成的文字（默认原样）
+        self.dropdown_anim = dropdown_anim  # 展开动画：前几次观察只画出第一行
+        self.box_first_look_mask = box_first_look_mask  # 登录框第一次观察时号码是这个（动画中间帧）
+        self.no_logout_looks = no_logout_looks  # 登录页前几次观察还没画出「登出」
         self.box_mask = None
         self.selected_uid = None
         self.cleared_login = False
@@ -160,14 +163,16 @@ class World:
         if state == "warning":
             return build_obs([("警告：游戏前详阅", 960, 426)])
         if state == "login_page":
-            return build_obs(LOGIN_PAGE)
+            return build_obs([item for item in LOGIN_PAGE if not (item[0] == "登出" and self.count <= self.no_logout_looks)])
         if state == "logout_dialog":
             image = radio_image(Image.new("RGB", (1920, 1080), (20, 24, 40)), self.keep, self.clear)
             return build_obs(LOGOUT_DIALOG, image)
         if state == "login_box":
-            return build_obs(box_texts(self.box_label(self.box_mask)))
+            mask = self.box_first_look_mask if self.count == 1 and self.box_first_look_mask else self.box_mask
+            return build_obs(box_texts(self.box_label(mask)))
         if state == "dropdown":
-            return build_obs(dropdown_texts(self.box_label(self.box_mask), self.rows()))
+            rows = self.rows()[:1] if self.count <= self.dropdown_anim else self.rows()
+            return build_obs(dropdown_texts(self.box_label(self.box_mask), rows))
         if state == "loading":
             return build_obs([("数值加载中（43.64%）", 348, 947)])
         if state == "click_enter":
@@ -451,6 +456,125 @@ class TestFlow:
         assert record["image"].endswith(".jpg")
 
 
+class TestAnimation:
+    def test_dropdown_first_look_has_only_one_row(self, tmp_path):
+        # 实机现象：展开动画中第一次观察只画出第一行，不能拿来判断目标不在列表里
+        env = Env(tmp_path, World(dropdown_anim=1))
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == HAPPY_CLICKS and "已切换到「账号乙」" in out.text
+
+    def test_dropdown_animation_lasting_two_looks(self, tmp_path):
+        env = Env(tmp_path, World(dropdown_anim=2))
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == HAPPY_CLICKS
+
+    def test_target_really_absent_is_confirmed_by_extra_look(self, tmp_path):
+        env = Env(tmp_path, World(dropdown_rows=[MASK_A, MASK_C]))
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names()[-1] == "box.arrow" and "账号列表里没有目标号码" in out.text
+        assert env.world.count >= 3  # 稳定的两次之后又看了一次才下结论
+
+    def test_box_misread_in_first_frame_does_not_skip_dropdown(self, tmp_path):
+        # 登录框第一帧号码显示成目标（动画中间帧），下一帧才是真正的号码：不能因此跳过选号
+        env = Env(tmp_path, World(box_first_look_mask=MASK_B))
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == HAPPY_CLICKS
+
+    def test_dropdown_that_never_settles_fails(self, tmp_path):
+        world = World()
+        env = Env(tmp_path, world)
+        base = world.observation
+        flip = {"n": 0}
+
+        def flicker():
+            obs = base()
+            if world.state == "dropdown":
+                flip["n"] += 1
+                rows = [MASK_A, MASK_B, MASK_C][: 1 + flip["n"] % 3]
+                obs = build_obs(dropdown_texts(MASK_A, rows))
+            return obs
+
+        env.tools._observer = lambda grid: flicker()
+        out = env.tools.switch_account("账号乙")
+        assert "list.row1" not in world.names() and "list.row2" not in world.names() and "稳定下来" in out.text
+
+
+class TestResume:
+    """从中途接着走：按当前画面直接跳到对应的那一步，之后线性往下走（不回头、不兜圈）。"""
+
+    def _start(self, tmp_path, state, **world_kwargs):
+        env = Env(tmp_path, World(**world_kwargs))
+        env.world.go(state)
+        return env
+
+    def test_from_expanded_dropdown(self, tmp_path):
+        env = self._start(tmp_path, "dropdown", dropdown_anim=1)
+        env.world.box_mask = MASK_A
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["list.row2", "box.enter", "login.start", "click_enter"]
+        assert "已切换到「账号乙」" in out.text and env.tools.tracker.uid == UID_B
+
+    def test_from_login_box_other_account(self, tmp_path):
+        env = self._start(tmp_path, "login_box")
+        env.world.box_mask = MASK_A
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == ["box.arrow", "list.row2", "box.enter", "login.start", "click_enter"]
+
+    def test_from_login_box_already_target(self, tmp_path):
+        env = self._start(tmp_path, "login_box")
+        env.world.box_mask = MASK_B
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == ["box.enter", "login.start", "click_enter"]
+
+    def test_from_login_page_goes_through_logout_again(self, tmp_path):
+        # 登录页可能是还没登出，也可能是选好号回来的；分不出就从登出走，重新选号，只走一遍
+        env = self._start(tmp_path, "login_page")
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["login.logout", "logout.exit", "box.arrow", "list.row2", "box.enter", "login.start", "click_enter"]
+        assert "已切换到" in out.text and "quit_game" not in env.world.names()
+
+    def test_from_login_page_without_logout_icon_waits_for_it(self, tmp_path):
+        env = self._start(tmp_path, "login_page", no_logout_looks=3)
+        env.tools.switch_account("账号乙")
+        assert env.world.names()[0] == "login.logout" and env.world.names()[-1] == "click_enter"
+
+    def test_from_logout_dialog(self, tmp_path):
+        env = self._start(tmp_path, "logout_dialog")
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == ["logout.exit", "box.arrow", "list.row2", "box.enter", "login.start", "click_enter"]
+
+    def test_from_logout_dialog_still_checks_radio(self, tmp_path):
+        env = self._start(tmp_path, "logout_dialog", keep_state=None, radio_fixed=True)
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["logout.keep", "logout.cancel"] and "已点「取消」中止" in out.text
+
+    def test_from_back_dialog(self, tmp_path):
+        env = self._start(tmp_path, "back")
+        env.tools.switch_account("账号乙")
+        assert env.world.names() == HAPPY_CLICKS[1:]
+
+    def test_from_click_enter_on_target(self, tmp_path):
+        env = self._start(tmp_path, "click_enter")
+        env.world.selected_uid = UID_B
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["click_enter"] and "已切换到" in out.text and env.tools.tracker.uid == UID_B
+
+    def test_from_click_enter_on_wrong_account_fails_without_switching_again(self, tmp_path):
+        env = self._start(tmp_path, "click_enter")
+        env.world.selected_uid = UID_A
+        out = env.tools.switch_account("账号乙")
+        assert env.world.names() == ["click_enter"]  # 不会自动再切一轮
+        assert "【切换账号失败】停在「确认账号」" in out.text and "不是目标账号" in out.text
+
+    def test_resume_never_clicks_forbidden_targets(self, tmp_path):
+        for state in ("login_page", "logout_dialog", "login_box", "dropdown", "click_enter", "back"):
+            env = self._start(tmp_path / state, state)
+            env.world.box_mask = MASK_A
+            env.world.selected_uid = UID_B
+            env.tools.switch_account("账号乙")
+            assert not FORBIDDEN_NAMES & set(env.world.names()), state
+
+
 class TestAlreadyCurrent:
     def test_target_is_current_does_nothing(self, env):
         out = env.tools.switch_account("账号甲")
@@ -608,11 +732,17 @@ class TestTimeouts:
 
     def test_unknown_screen_at_start_does_not_click(self, tmp_path):
         env = Env(tmp_path, World())
-        env.world.go("monthly")  # M7A 认得，但不是主界面
-        env.world.go("loading")  # 认不出
-        env.world.stuck = "loading"
+        env.world.go("entering")  # 黑屏：M7A 认不出，也没有任何文字
+        env.world.stuck = "entering"
         out = env.tools.switch_account("账号乙")
         assert env.world.clicks == [] and "不是主界面也不是手机菜单" in out.text
+
+    @pytest.mark.parametrize("state", ["warning", "loading"])
+    def test_loading_screen_at_start_does_not_click(self, tmp_path, state):
+        env = Env(tmp_path, World(stuck=state))
+        env.world.go(state)
+        out = env.tools.switch_account("账号乙")
+        assert env.world.clicks == [] and "游戏正在加载" in out.text
 
     def test_wrong_uid_at_the_end_fails(self, tmp_path):
         env = Env(tmp_path, World(final_uid=UID_C))
