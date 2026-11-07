@@ -957,7 +957,7 @@ class TestForeground:
 class TestScreens:
     def test_list_screens_reads_screens_json(self, env):
         text = env.tools.list_screens().text
-        assert "M7A 认识 56 个界面" in text
+        assert f"M7A 认识 {len(mt.load_screens(mt.SCREENS_PATH))} 个界面" in text  # 上游会新增界面，不写死数量
         assert "main  主界面" in text
 
     def test_goto_screen_unknown(self, env):
