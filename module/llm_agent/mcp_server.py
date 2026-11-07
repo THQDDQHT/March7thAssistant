@@ -183,6 +183,12 @@ def create_mcp(tools, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, statel
     async def switch_account(account: Annotated[str, Field(description="账号名（如 accounts.json 里的 name）或 9–10 位 UID")]):
         return await call(tools.switch_account, account)
 
+    @tool("退出游戏客户端：直接结束游戏进程（M7A 自己的 stop_game，和「任务完成后=退出」同一套），不点任何按钮。"
+          "只在主界面或手机菜单执行（战斗、剧情、副本结算途中会拒绝，先 goto_screen(\"main\")）；有 M7A 任务在跑时拒绝。"
+          "结束后会确认游戏进程真的没了；返回「结果不确定」时用 get_status 核实，不要连续重复调用。每日任务全部做完后用它关掉客户端。")
+    async def quit_game():
+        return await call(tools.quit_game)
+
     @tool("等待几秒（加载、动画），然后返回新画面。")
     async def wait(seconds: Annotated[float, Field(description="1-10 秒")] = 2):
         return await call(tools.wait, seconds)

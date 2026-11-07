@@ -86,9 +86,18 @@ class FakeGame:
         self.running = running
         self.can_front = can_front
         self.bring_calls = 0
+        self.quit_calls = 0
+        self.quit_result = True  # stop_game 的返回值
+        self.quit_kills = True  # quit 之后进程是否真的没了
 
     def is_running(self):
         return self.running
+
+    def quit(self):
+        self.quit_calls += 1
+        if self.quit_kills:
+            self.running = False
+        return self.quit_result
 
     def is_front(self):
         return self.front
@@ -1240,6 +1249,10 @@ class TestOffline:
         tools.observe()
         assert "danger_target" in tools.click(2).text
 
+    def test_quit_game_not_run_offline(self, offline):
+        tools, _ = offline
+        assert "离线模式" in tools.quit_game().text
+
     def test_tasks_not_run_offline(self, offline):
         tools, _ = offline
         assert "离线模式" in tools.run_m7a_task("daily").text
@@ -1775,3 +1788,70 @@ class TestProgress:
     def test_get_status_unknown_account(self, tmp_path):
         text = Env(tmp_path).tools.get_status().text
         assert "当前账号：未知（还没在画面左下角认到 UID）" in text
+
+
+# ---------------------------------------------------------------- quit_game ----
+
+class TestQuitGame:
+    def test_quits_on_main_and_confirms(self, env):
+        out = env.tools.quit_game()
+        assert "已退出游戏" in out.text
+        assert env.game.quit_calls == 1
+        record = env.records("quit_game")[0]
+        assert record["outcome"] == "quit" and record["screen_before"] == "main"
+
+    def test_allowed_on_phone_menu(self, tmp_path):
+        env = Env(tmp_path, recognized="menu")
+        assert "已退出游戏" in env.tools.quit_game().text
+
+    def test_refuses_outside_main_or_menu(self, tmp_path):
+        env = Env(tmp_path, recognized="map")
+        out = env.tools.quit_game()
+        assert "【未执行】" in out.text and "星际地图" in out.text and 'goto_screen("main")' in out.text
+        assert env.game.quit_calls == 0
+        assert env.records("quit_game")[0]["outcome"] == "unsafe_screen"
+
+    def test_refuses_unknown_screen(self, tmp_path):
+        env = Env(tmp_path, recognized=None)
+        assert "【未执行】" in env.tools.quit_game().text and env.game.quit_calls == 0
+
+    def test_refuses_while_m7a_task_runs(self, env):
+        env.runs.active = {"task": "daily", "run_id": "r1"}
+        out = env.tools.quit_game()
+        assert "被拒绝" in out.text and env.game.quit_calls == 0
+        assert env.records("quit_game")[0]["verdict"]["rule"] == "task_running"
+
+    def test_game_not_running(self, env):
+        env.game.running = False
+        out = env.tools.quit_game()
+        assert "本来就没在运行" in out.text and env.game.quit_calls == 0
+        assert env.records("quit_game")[0]["outcome"] == "not_running"
+
+    def test_unconfirmed_when_process_survives(self, env):
+        env.game.quit_kills = False  # stop_game 照样返回 True，但进程还在
+        out = env.tools.quit_game()
+        assert "【结果不确定】" in out.text and "已退出" not in out.text
+        assert env.game.quit_calls == 1
+        assert sum(env.sleeps) >= mt.McpTools.QUIT_CONFIRM_SECONDS
+        assert env.records("quit_game")[0]["outcome"] == "unconfirmed"
+
+    def test_request_failed(self, env):
+        env.game.quit_kills = False
+        env.game.quit_result = False
+        out = env.tools.quit_game()
+        assert "【未执行成功】" in out.text
+        assert env.records("quit_game")[0]["outcome"] == "request_failed"
+
+    def test_busy_lock_refuses(self, env, monkeypatch):
+        monkeypatch.setattr(mt.McpTools, "QUIT_LOCK_TIMEOUT", 0.01)
+        env.tools._lock.acquire()
+        try:
+            assert "【未执行】" in env.tools.quit_game().text
+        finally:
+            env.tools._lock.release()
+        assert env.game.quit_calls == 0
+
+    def test_forgets_last_observation_after_quit(self, env):
+        env.tools.observe()
+        env.tools.quit_game()
+        assert env.tools._last is None

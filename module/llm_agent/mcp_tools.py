@@ -275,6 +275,9 @@ class OfflineGame:
     def resolution(self):
         return None
 
+    def quit(self) -> bool:
+        return True
+
 
 class RealGame:
     """游戏窗口（实机）：复用 M7A 的游戏控制器（local_game / cloud_game）。"""
@@ -299,6 +302,10 @@ class RealGame:
 
     def resolution(self):
         return self._controller().get_resolution()
+
+    def quit(self) -> bool:
+        """退出游戏客户端：用 M7A 自己的 stop_game（「任务完成后=退出」走的也是它）。"""
+        return bool(self._controller().stop_game())
 
 
 class OfflineObserver:
@@ -1670,6 +1677,81 @@ class McpTools:
             return ToolOutput(f"发送停止指令失败：{self._safe(e)}")
         self._write_record("stop_m7a_task", args, started, extra={"output": text[-500:]})
         return ToolOutput("已发送停止指令（main.py --control current stop）：\n" + text)
+
+    # ------------------------------------------------------------ 退出游戏 ----
+
+    # 只在这两个界面允许退游戏：避免战斗、剧情、副本结算途中被强退
+    QUIT_SAFE_SCREENS = ("main", "menu")
+    QUIT_CONFIRM_SECONDS = 10  # 结束进程后最多等这么久确认游戏真的没了
+    QUIT_LOCK_TIMEOUT = 10  # 等其它操作让出互斥锁的秒数
+
+    def quit_game(self) -> ToolOutput:
+        """退出游戏客户端：直接结束游戏进程（M7A 的 stop_game，「任务完成后=退出」用的也是它）。
+
+        只在主界面或手机菜单执行；有 M7A 任务在跑时拒绝；游戏本来就没运行就直接说明。
+        不点任何按钮，所以不走护栏，但界面检查和任务检查都要过。
+        stop_game 不管进程有没有结束都返回成功，所以结束后要再用 is_running 确认。
+        """
+        tool, args = "quit_game", {}
+        started = self._clock()
+        if self.offline:
+            return self._refuse(tool, args, started, RULE_OFFLINE, "离线模式不会退出游戏。")
+
+        def finish(outcome: str, text: str, screen=(None, None)) -> ToolOutput:
+            self._write_record(tool, args, started, before_screen=screen, extra={"outcome": outcome})
+            return ToolOutput(text)
+
+        try:
+            with self._exclusive(timeout=self.QUIT_LOCK_TIMEOUT):
+                task = self._active_task()
+                if task:
+                    return self._refuse(tool, args, started, RULE_TASK_RUNNING, task)
+                try:
+                    running = self.game.is_running()
+                except Exception as e:
+                    reraise_passthrough(e)
+                    return finish("check_failed", f"【未执行】检测游戏窗口失败：{self._safe(e)}")
+                if not running:
+                    return finish("not_running", "游戏本来就没在运行，不用退出。")
+                problem = self._ensure_front(False)
+                if problem:
+                    return finish("not_front", f"【未执行】{problem}")
+                screen = self._detect_screen()
+                screen_id, name = screen
+                if screen_id not in self.QUIT_SAFE_SCREENS:
+                    return finish("unsafe_screen",
+                                  f"【未执行】当前在「{name or screen_id or '未知'}」，只在主界面/手机菜单退游戏；"
+                                  f"先 goto_screen(\"main\") 回主界面再退。", screen)
+                requested = self.game.quit()
+                self._last = None
+                self._last_screen = (None, None)
+                gone = self._wait_game_gone()
+        except ToolBusy as e:
+            return ToolOutput(f"【未执行】{e}")
+        except Exception as e:
+            reraise_passthrough(e)
+            return finish("error", f"退出游戏失败：{self._safe(e)}")
+
+        if gone:
+            return finish("quit", "已退出游戏：星穹铁道客户端已关闭。", screen)
+        if not requested:
+            return finish("request_failed", "【未执行成功】结束游戏进程失败，游戏还在运行；看 M7A 日志里的「终止游戏时发生错误」。",
+                          screen)
+        return finish("unconfirmed", f"【结果不确定】已经请求结束游戏进程，但 {self.QUIT_CONFIRM_SECONDS} 秒后游戏还在；"
+                                     "过一会儿用 get_status 核实，不要连续重复调用。", screen)
+
+    def _wait_game_gone(self) -> bool:
+        """结束游戏进程后轮询 is_running，最多 QUIT_CONFIRM_SECONDS 秒；检测出错按「还没确认」处理。"""
+        deadline = self._clock() + self.QUIT_CONFIRM_SECONDS
+        while True:
+            try:
+                if not self.game.is_running():
+                    return True
+            except Exception as e:
+                reraise_passthrough(e)
+            if self._clock() >= deadline:
+                return False
+            self._sleep(1)
 
     def get_status(self) -> ToolOutput:
         lines = [f"运行模式：{'离线（固定截图，输入是空操作）' if self.offline else '实机'}", f"输入模式：{self._input_mode()}"]

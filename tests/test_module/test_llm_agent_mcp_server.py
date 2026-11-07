@@ -17,7 +17,7 @@ from module.llm_agent.mcp_tools import ToolOutput  # noqa: E402
 TOKEN = "unit-test-token-0123456789"
 JPEG = b"\xff\xd8\xff\xe0fake-jpeg-bytes"
 EXPECTED_TOOLS = sorted("""observe battle_state battle_act click click_grid press_key press_keys scroll drag wait list_screens goto_screen list_m7a_tasks
-    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user record_progress get_progress list_characters get_m7a_config set_m7a_config switch_account""".split())
+    run_m7a_task stop_m7a_task get_status web_search fetch_page leave_for_user resolve_todo list_todo_for_user record_progress get_progress list_characters get_m7a_config set_m7a_config switch_account quit_game""".split())
 
 
 class FakeTools:
