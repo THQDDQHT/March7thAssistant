@@ -1090,6 +1090,64 @@ class TestTasks:
         assert "游戏窗口：不在" in text and "任务运行中，不检测" in text
 
 
+class TestGameNotRunning:
+    """游戏窗口不在时立刻回复，不去截图（实机上 M7A 截图找不到窗口会重试到超时）。"""
+
+    @pytest.fixture
+    def gone(self, tmp_path):
+        env = Env(tmp_path)
+        env.game.running = False
+        return env
+
+    def test_get_status_skips_screen_detection(self, gone):
+        text = gone.tools.get_status().text
+        assert f"游戏窗口：不在。{mt.GAME_NOT_RUNNING}" in text
+        assert "当前界面：游戏没有运行，不检测" in text
+        assert gone.screen.current_screen is None  # 没调 get_current_screen
+        assert gone.observe_calls == []
+
+    def test_observe_fails_fast(self, gone):
+        out = gone.tools.observe()
+        assert out.text == f"观察失败：{mt.GAME_NOT_RUNNING}"
+        assert out.image is None and gone.observe_calls == []
+
+    def test_battle_state_fails_fast(self, gone):
+        assert mt.GAME_NOT_RUNNING in gone.tools.battle_state().text
+        assert gone.observe_calls == []
+
+    def test_goto_screen_does_not_navigate(self, gone):
+        text = gone.tools.goto_screen("menu").text
+        assert "结果（失败）：" + mt.GAME_NOT_RUNNING in text
+        assert "操作后重新观察失败：" + mt.GAME_NOT_RUNNING in text
+        assert gone.screen.changes == [] and gone.observe_calls == []
+
+    def test_wait_does_not_sleep(self, gone):
+        text = gone.tools.wait(10).text
+        assert mt.GAME_NOT_RUNNING in text
+        assert 10 not in gone.sleeps and gone.observe_calls == []
+
+    def test_background_mode_also_checks(self, tmp_path):
+        env = Env(tmp_path, background=True)
+        env.game.running = False
+        assert env.tools.observe().text == f"观察失败：{mt.GAME_NOT_RUNNING}"
+
+    def test_game_closing_after_action_reports_fast(self, env):
+        def change_then_close(target, max_recursion=2):
+            env.screen.changes.append(target)
+            env.game.running = False  # 跳转途中游戏被关掉
+        env.screen.change_to = change_then_close
+        text = env.tools.goto_screen("menu").text
+        assert env.screen.changes == ["menu"]
+        assert "操作后重新观察失败：" + mt.GAME_NOT_RUNNING in text and env.observe_calls == []
+
+    def test_detection_error_does_not_block(self, env):
+        def boom():
+            raise RuntimeError("查不了")
+        env.game.is_running = boom
+        out = env.tools.observe()
+        assert out.image is not None and env.observe_calls == [False]
+
+
 # ---------------------------------------------------------------- 联网 ----
 
 class TestWeb:

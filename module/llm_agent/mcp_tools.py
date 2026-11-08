@@ -62,6 +62,8 @@ FETCH_CHARS_MIN, FETCH_CHARS_MAX = 500, 20000
 SETTLE_SECONDS = 1.5
 # 切到前台后等一下再操作
 FRONT_SETTLE_SECONDS = 0.3
+# 游戏没开时直接这样回复。M7A 截图找不到窗口会一直重试到超时（约 60 秒），不先查就会白等
+GAME_NOT_RUNNING = "游戏没有在运行（找不到游戏窗口），需要先启动游戏（M7A 的 game 任务会启动并进入游戏）"
 # 最近一次观察超过这么久（秒），按键、拖动、滚动前先重新观察一次（护栏要看的是当下的画面）
 STALE_SECONDS = 20
 # 抢操作锁最多等多久（秒）
@@ -1018,6 +1020,9 @@ class McpTools:
         """
         if self.offline:
             return None
+        missing = self._game_missing()
+        if missing:
+            return missing
         handler = getattr(self.auto, "input_handler", None)
         if getattr(handler, "is_background", False) is True:
             return None
@@ -1038,6 +1043,22 @@ class McpTools:
             reraise_passthrough(e)
             return f"切换游戏窗口到前台失败：{self._safe(e)}"
 
+    def _game_missing(self) -> Optional[str]:
+        """实机下游戏窗口不在时返回 GAME_NOT_RUNNING；离线或检测本身出错返回 None（检测出错不拦，照原流程走）。"""
+        if self.offline:
+            return None
+        try:
+            return None if self.game.is_running() else GAME_NOT_RUNNING
+        except Exception as e:
+            reraise_passthrough(e)
+            return None
+
+    def _require_game(self):
+        """截图前调用：游戏不在就立刻报错，不等 M7A 截图重试到超时。"""
+        missing = self._game_missing()
+        if missing:
+            raise RuntimeError(missing)
+
     def _detect_screen(self) -> Tuple[Optional[str], Optional[str]]:
         """用 M7A 的界面识别认当前界面；认不出返回 (None, None)。"""
         try:
@@ -1051,6 +1072,7 @@ class McpTools:
         return None, None
 
     def _take_observation(self, grid: bool = False) -> Observation:
+        self._require_game()
         observation = self._observe(grid)
         try:
             self.tracker.update(observation)
@@ -1260,6 +1282,7 @@ class McpTools:
 
     def _screenshot(self):
         """只截图（不 OCR）。注入了 observer（离线、测试）时用它的图。"""
+        self._require_game()
         if self._observer is not None:
             return self._observer(False).image
         return self.auto.take_screenshot()[0]
@@ -1755,15 +1778,17 @@ class McpTools:
 
     def get_status(self) -> ToolOutput:
         lines = [f"运行模式：{'离线（固定截图，输入是空操作）' if self.offline else '实机'}", f"输入模式：{self._input_mode()}"]
+        running = None  # None：离线或检测出错
         if self.offline:
             lines.append("游戏窗口：离线模式不检测")
         else:
             try:
-                if self.game.is_running():
+                running = bool(self.game.is_running())
+                if running:
                     size = self.game.resolution()
                     lines.append("游戏窗口：在" + (f"（{size[0]}×{size[1]}）" if size else ""))
                 else:
-                    lines.append("游戏窗口：不在（游戏没有运行？）")
+                    lines.append(f"游戏窗口：不在。{GAME_NOT_RUNNING}")
             except Exception as e:
                 reraise_passthrough(e)
                 lines.append(f"游戏窗口：检测失败（{self._safe(e)}）")
@@ -1771,6 +1796,8 @@ class McpTools:
         lines.append(f"正在跑的任务：{active}" if active else "正在跑的任务：无")
         if active:
             lines.append("当前界面：任务运行中，不检测（用 observe 看画面）")
+        elif running is False:
+            lines.append("当前界面：游戏没有运行，不检测")
         else:
             screen_text = "（另一个操作正在执行，未检测）"
             try:
