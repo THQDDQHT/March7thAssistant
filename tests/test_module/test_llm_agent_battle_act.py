@@ -94,7 +94,7 @@ class Arena:
 
     def record(self):
         paths = sorted(Path(self.tools.recorder.base_dir).glob("*/*-battle_act.json"))
-        return json.loads(paths[-1].read_text())
+        return json.loads(paths[-1].read_text(encoding="utf-8"))
 
 
 @pytest.fixture
