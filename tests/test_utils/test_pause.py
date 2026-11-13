@@ -1,5 +1,6 @@
 # coding:utf-8
 """utils/pause.py 暂停控制器测试。"""
+import sys
 import threading
 import time
 
@@ -84,6 +85,21 @@ def test_checkpoint_passes_through_when_running(controller):
     start = time.monotonic()
     controller.checkpoint()
     assert time.monotonic() - start < 0.5
+
+
+def test_pause_and_resume_take_effect_before_receipt(controller, control_path, monkeypatch):
+    receipts = []
+    write_state = controller._write_state
+
+    def record_receipt(state):
+        write_state(state)
+        receipts.append((read_state(control_path), controller.is_paused()))
+
+    monkeypatch.setattr(controller, "_write_state", record_receipt)
+    controller.request_pause()
+    controller.request_resume()
+
+    assert receipts == [(STATE_PAUSING, True), (STATE_RUNNING, False)]
 
 
 def test_checkpoint_blocks_during_pause_and_announces_once(controller, log_stub):
@@ -213,6 +229,15 @@ def test_stop_raises_at_next_checkpoint(controller, control_path, log_stub):
     assert pause_mod.STOP_LOG_MESSAGE in log_stub.messages
     with pytest.raises(pause_mod.RunStopRequested):
         controller.checkpoint()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="只有 Windows 上替换正被读取的文件会失败")
+def test_stop_receipt_is_written_while_reader_holds_file(controller, control_path):
+    """回执只写一次：替换时撞上图形界面正在读回执文件，要等对方读完再写，不能丢掉。"""
+    reader = open(control_path + pause_mod.STATE_FILE_SUFFIX, "r", encoding="utf-8")
+    threading.Timer(0.05, reader.close).start()
+    controller.request_stop()
+    assert read_state(control_path) == pause_mod.STATE_STOPPING
 
 
 def test_stop_is_not_swallowed_by_except_exception(controller):

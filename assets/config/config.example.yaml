@@ -31,6 +31,7 @@ pause_after_success: true # 是否在成功后暂停程序。true 若非循环�
 exit_after_failure: false # 是否在失败后直接退出。true 直接退出，false 暂停程序。
 
 # 任务完成后操作
+exit_app_after_success: false # GUI 中整条任务链全部成功后关闭助手；可与退出游戏组合，有按时任务或待执行完成后操作时保持运行。
 after_finish: None # 任务完成后的操作，可选值："None"（无操作）, "Exit"（退出程序）, "Loop"（循环执行）, "Shutdown"（关机）, "Sleep"（睡眠）, "Hibernate"（休眠）, "Restart"（重启）, "Logoff"（注销）, "TurnOffDisplay"（关闭显示器）, "RunScript"（运行脚本）。
 
 # 任务完成后是否播放提示音
@@ -380,6 +381,8 @@ apocalyptic_team3: # 星启模式第三队默认使用丹恒，可配置1至4名
   - - DanHeng
     - -1
 apocalyptic_timestamp: 0 # 上次运行末日幻影的时间戳，用于记录和控制运行频率。
+# 游戏优化总开关（默认开启以兼容旧版；关闭不清除下面三个独立选项）
+game_optimization_enable: true
 # 自动战斗和二倍速检测配置
 auto_battle_detect_enable: true # 是否启用自动战斗和二倍速检测。true 开启，false 关闭。
 
@@ -401,6 +404,10 @@ llm_takeover_extra_danger_words: [] # 追加的危险词列表，画面或按钮
 
 # 自动修改分辨率配置
 auto_set_resolution_enable: true # 是否启用自动修改分辨率功能。true 开启，false 关闭。
+
+# 任务期间自动降低画质（默认关闭，仅支持 Windows 本地游戏的已知自定义画质格式）
+# 不修改帧率、渲染比例与抗锯齿；任务结束恢复持久配置，运行中的画面需重启游戏后恢复。
+auto_lower_graphics_enable: false
 
 # 自动配置游戏路径
 auto_set_game_path_enable: true # 是否启用自动配置游戏路径。true 开启，false 关闭。
@@ -424,6 +431,7 @@ script_path: C:\Path\to\your\Script.bat
 hotkey_technique: e # 设置游戏内使用秘技的按键。
 hotkey_map: m # 设置打开地图的按键。
 hotkey_warp: f3 # 设置打开跃迁的按键。
+hotkey_message: p # 设置打开短信的按键。
 hotkey_auto_battle: v # 设置自动战斗的按键。
 
 # 图形界面快捷键设置

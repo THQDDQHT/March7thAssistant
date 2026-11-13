@@ -1,6 +1,7 @@
 # coding:utf-8
 from collections import deque
 from copy import deepcopy
+from dataclasses import dataclass
 
 from PySide6.QtCore import Qt, QProcess, QProcessEnvironment, Signal, QTimer, QDateTime, QEvent, QMetaObject, Slot
 from PySide6.QtGui import QFont, QTextCursor
@@ -29,6 +30,7 @@ from utils.tasks import TASK_NAMES, PAUSABLE_TASKS
 from utils.pause import (COMMAND_PAUSE, COMMAND_RESUME, COMMAND_STOP, STATE_PAUSING, STATE_PAUSED,
                          STATE_RUNNING, STATE_STOPPING, write_command, read_state, reset_files)
 from utils.desktop import open_log_folder
+from utils.desktop_twin import in_desktop_twin
 from .schedule_dialog import ScheduleManagerDialog
 from module.notification import notif
 from module.localization import tr
@@ -309,6 +311,12 @@ class GameLogOverlay(QWidget):
             self.hide()
 
 
+@dataclass
+class _TaskSequence:
+    succeeded: bool = True
+    finished: bool = False
+
+
 class LogInterface(ScrollArea):
     """日志界面"""
 
@@ -317,7 +325,9 @@ class LogInterface(ScrollArea):
     MAX_LOG_LINES = 5000
 
     # 信号：任务完成
-    taskFinished = Signal(int)  # exit_code
+    taskFinished = Signal(int)  # 单个任务的 exit_code，保留原有通知语义
+    taskSequenceFinished = Signal(int)  # 整条任务链结束，只有全部成功才为 0
+    taskStarted = Signal()
     # 信号：请求停止任务（用于从全局热键线程安全调用）
     stopTaskRequested = Signal()
     # 信号：请求切换任务暂停/继续（用于从全局热键线程安全调用）
@@ -331,6 +341,7 @@ class LogInterface(ScrollArea):
         super().__init__(parent=parent)
         self.process = None
         self.current_task = None
+        self._task_sequence = None
         # 保存语言无关的状态，而不是缓存暂停前的译文。
         self._task_status = 'waiting'
         self._task_display_name = None
@@ -1005,6 +1016,8 @@ class LogInterface(ScrollArea):
         return bool(self.process and self.process.state() != QProcess.NotRunning) or self._external_task_active
 
     def runScheduledTask(self, task, tasks=None, manual=False) -> bool:
+        if getattr(self, "_desktop_twin_hosting", False):
+            return False
         task_dict = self._buildScheduledTaskPayload(task)
         chain = self._buildScheduledTaskChain(task, tasks)
 
@@ -1139,6 +1152,8 @@ class LogInterface(ScrollArea):
 
     def _checkScheduledTime(self, now=None):
         """检查是否到达任意已启用的定时任务时间并触发对应任务"""
+        if getattr(self, "_desktop_twin_hosting", False):
+            return
         # 任务暂停期间不触发定时任务，避免打断暂停或为启动新任务而强制停止当前任务
         if self._pause_state in (STATE_PAUSING, STATE_PAUSED):
             self._updateScheduleStatusLabel()
@@ -1214,6 +1229,9 @@ class LogInterface(ScrollArea):
         return timer is not None
 
     def _schedulePostAction(self, action):
+        if in_desktop_twin():
+            self.appendLog("桌面分身已跳过系统完成后操作\n")
+            return
         self._cancelPendingPostAction()
         label = self._post_action_label(action)
         self.appendLog(f"任务完成后操作： {label}（将在60秒后执行，可通过停止按钮取消）\n")
@@ -1235,8 +1253,11 @@ class LogInterface(ScrollArea):
         self.stopButton.setEnabled(True)
         timer.start(60000)
 
-    def startTask(self, command_or_task):
+    def startTask(self, command_or_task, *, _sequence=None):
         """启动任务"""
+        if getattr(self, "_desktop_twin_hosting", False):
+            self.appendLog("当前由分身内的小助手运行任务\n")
+            return
         # 如果有正在运行的任务，先停止
         if self.process and self.process.state() == QProcess.Running:
             self._suppress_chain_continuation_once = True
@@ -1244,6 +1265,9 @@ class LogInterface(ScrollArea):
             # 等待进程结束
             self.process.waitForFinished(3000)
 
+        # 只有链内续跑复用结果；手动启动、定时触发及冲突替换均开始新的一次运行。
+        self._task_sequence = _sequence if _sequence is not None else _TaskSequence()
+        self.taskStarted.emit()
         if self._cancelPendingPostAction():
             self.appendLog("已取消完成后操作\n")
         self._clearTaskTimeout()
@@ -1349,6 +1373,8 @@ class LogInterface(ScrollArea):
             raise RuntimeError(tr('任务正在运行'))
 
         self._pending_task_meta = None
+        self._task_sequence = _TaskSequence()
+        self.taskStarted.emit()
         self._external_task_active = True
         self._external_task_name = str(task_name)
         self._external_task_stop_callback = stop_callback
@@ -1390,7 +1416,10 @@ class LogInterface(ScrollArea):
         self.current_task = None
         self._hideLogOverlay()
         self._updateFinishedStatus(effective_exit_code)
+        sequence = self._task_sequence
+        sequence.succeeded = effective_exit_code == 0
         self.taskFinished.emit(effective_exit_code)
+        self._finishTaskSequence(sequence)
 
     def _startTask(self, task, timeout=0):
         self.current_task = task
@@ -1729,7 +1758,8 @@ class LogInterface(ScrollArea):
 
     def _pauseControlPath(self):
         """暂停指令文件路径（CLI 通过环境变量 MARCH7TH_CONTROL_FILE 读取同一路径）。"""
-        return os.path.abspath(os.path.join('temp', 'pause.json'))
+        name = f'pause-{os.getpid()}.json' if in_desktop_twin() else 'pause.json'
+        return os.path.abspath(os.path.join('temp', name))
 
     def _injectPauseControlEnv(self, env):
         """向子进程注入暂停控制文件路径并清理陈旧状态。"""
@@ -2063,6 +2093,10 @@ class LogInterface(ScrollArea):
             if process is not self.process or getattr(process, '_task_finalized', False):
                 return
             process._task_finalized = True
+        # taskkill/进程崩溃不会执行子进程 finally；只恢复已确认退出的备份。
+        from utils.temporary_graphics import recover_temporary_graphics
+        from module.logger import log
+        recover_temporary_graphics(log)
         # 终止并清理任何和当前任务绑定的超时定时器
         self._clearTaskTimeout()
         # 复位暂停状态并清理控制文件
@@ -2093,7 +2127,14 @@ class LogInterface(ScrollArea):
                     pass
                 self.appendLog(f"任务异常结束，退出码: {exit_code}\n")
 
+        sequence = getattr(self, '_task_sequence', None)
+        if sequence is None or sequence.finished:
+            sequence = self._task_sequence = _TaskSequence()
         suppress_chain_continuation = bool(getattr(self, '_suppress_chain_continuation_once', False))
+        sequence.succeeded = sequence.succeeded and (
+            exit_status == QProcess.NormalExit and exit_code == 0 and
+            not user_stop and not self._stopped_abnormally and not suppress_chain_continuation
+        )
         self._suppress_chain_continuation_once = False
         next_chain_task = None
         try:
@@ -2123,6 +2164,7 @@ class LogInterface(ScrollArea):
                     if remaining:
                         self.appendLog('链式任务已中断，未继续执行: {}'.format(remaining) + "\n")
         except Exception:
+            sequence.succeeded = False
             next_chain_task = None
             self._active_task_chain = []
             try:
@@ -2148,7 +2190,11 @@ class LogInterface(ScrollArea):
                         for proc_name in proc_list:
                             try:
                                 if os.name == 'nt':
-                                    sp.run(['taskkill', '/IM', proc_name, '/F'], capture_output=True, creationflags=sp.CREATE_NO_WINDOW)
+                                    command = ['taskkill', '/IM', proc_name, '/F']
+                                    if in_desktop_twin():
+                                        from utils.windows_session import process_session_id
+                                        command += ['/FI', f'SESSION eq {process_session_id()}']
+                                    sp.run(command, capture_output=True, creationflags=sp.CREATE_NO_WINDOW)
                                 else:
                                     sp.run(['pkill', '-f', proc_name], capture_output=True)
                                 self.appendLog(f"已终止进程: {proc_name}\n")
@@ -2238,7 +2284,7 @@ class LogInterface(ScrollArea):
             try:
                 next_meta, next_task_dict = next_chain_task
                 self._pending_task_meta = next_meta
-                self.startTask(next_task_dict)
+                self.startTask(next_task_dict, _sequence=sequence)
                 if self._hasActiveStartedProcess():
                     name = next_meta.get('name') or tr('未命名')
                     self.appendLog('链式启动下一任务: {}'.format(name) + "\n")
@@ -2248,10 +2294,12 @@ class LogInterface(ScrollArea):
                     return
                 self._pending_task_meta = None
                 self._active_task_chain = []
+                sequence.succeeded = False
                 self.appendLog('链式启动下一任务失败: {}'.format(next_meta.get('name') or '未命名') + "\n")
             except Exception as e:
                 self._pending_task_meta = None
                 self._active_task_chain = []
+                sequence.succeeded = False
                 self.appendLog(f"链式启动任务失败: {e}\n")
 
         # 如果有排队的延迟启动任务（由于冲突设置导致在停止当前任务后再启动），在进程结束处理完成后启动它
@@ -2288,6 +2336,38 @@ class LogInterface(ScrollArea):
                     self.appendLog(f"延迟启动任务失败: {e}\n")
         except Exception:
             pass
+
+        self._finishTaskSequence(sequence)
+
+    def _finishTaskSequence(self, sequence):
+        """收尾完成且没有后续任务时才通知主窗口，忽略嵌套启动失败造成的重复回调。"""
+        if sequence is not self._task_sequence or sequence.finished:
+            return
+        if self._hasActiveStartedProcess() or self._active_task_chain or self._pending_start_task_after_stop:
+            return
+        sequence.finished = True
+        self.taskSequenceFinished.emit(0 if sequence.succeeded else 1)
+
+    def autoCloseBlockReason(self, preserve_schedule=True):
+        """自动关闭前再次检查运行状态；不取消任务、定时器或完成后操作。"""
+        twin_active = getattr(getattr(self.window(), "toolsInterface", None), "desktopTwinActive", None)
+        if twin_active and twin_active():
+            return "桌面分身仍在使用"
+        if self._hasActiveStartedProcess() or self._active_task_chain or self._pending_start_task_after_stop:
+            return "仍有运行中或排队的任务"
+        if self._pending_post_action_timer or self._pending_post_action:
+            return "仍有等待执行的完成后操作"
+        if preserve_schedule:
+            tasks = cfg.get_value('scheduled_tasks', []) or []
+            if any(task.get('enabled', True) and task_trigger_mode(task) == 'time' for task in tasks):
+                return "仍有已启用的按时任务"
+        return None
+
+    def setDesktopTwinHosting(self, active):
+        self._desktop_twin_hosting = active
+        if not active:
+            # 交回定时时跳过当前分钟，避免和分身实例重复触发同一时间槽。
+            self._last_schedule_minute = QDateTime.currentDateTime().toSecsSinceEpoch() // 60
 
     def _onProcessError(self, error, process=None):
         """进程错误"""

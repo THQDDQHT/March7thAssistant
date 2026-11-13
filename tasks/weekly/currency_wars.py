@@ -1,3 +1,4 @@
+from utils.game_options import game_option_enabled
 from module.screen import screen
 from module.automation import auto
 from module.config import cfg
@@ -332,9 +333,12 @@ class CurrencyWars:
 
         instance_name_crop = (616 / 1920, 418 / 1080, 889 / 1920, 416 / 1080)
         has_found = False
-        for i in range(5):
+        max_drags = 5
+        for page in range(max_drags + 1):
             if auto.click_element(("提取"), "min_distance_text", crop=instance_name_crop, include=True, source=instance_name, source_type="text", position="right"):
                 has_found = True
+                break
+            if page == max_drags:
                 break
             if not drag_list(auto, (1100 / 1920, 770 / 1080), (1100 / 1920, 470 / 1080), crop=instance_name_crop, duration=1.0):
                 return False
@@ -2569,7 +2573,7 @@ class CurrencyWars:
         """
         检查并开启自动战斗
         """
-        if cfg.auto_battle_detect_enable and auto.find_element("./assets/images/share/base/not_auto.png", "image", 0.9, crop=(0.0 / 1920, 903.0 / 1080, 144.0 / 1920, 120.0 / 1080)):
+        if game_option_enabled(cfg, "auto_battle_detect_enable") and auto.find_element("./assets/images/share/base/not_auto.png", "image", 0.9, crop=(0.0 / 1920, 903.0 / 1080, 144.0 / 1920, 120.0 / 1080)):
             log.info("尝试开启自动战斗")
             auto.press_key(cfg.get_value("hotkey_auto_battle", "v"))
             return True

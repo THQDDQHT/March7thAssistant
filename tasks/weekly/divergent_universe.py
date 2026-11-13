@@ -1,3 +1,4 @@
+from utils.game_options import game_option_enabled
 from module.screen import screen
 from module.automation import auto
 from module.config import cfg
@@ -581,6 +582,8 @@ class DivergentUniverse:
                             # for _ in range(100):
                             while time.monotonic() - event_start_time < 30 * 60:  # 最多等待30分钟 应该不会有人战斗能打半小时吧
                                 if self.check_click_close() or self.check_title() or self.check_auto_battle():
+                                    if self.stage_finish:
+                                        return
                                     time.sleep(2)
                                 elif auto.find_element("./assets/images/screen/divergent_universe/stage.png", "image", 0.9, crop=(33 / 1920, 52 / 1080, 68 / 1920, 60 / 1080)):
                                     break
@@ -646,6 +649,8 @@ class DivergentUniverse:
                                     time.sleep(2)
                                 else:
                                     break
+                            if self.stage_finish:
+                                return
                             if has_interaction:
                                 start_time = time.monotonic()
                             else:
@@ -674,7 +679,8 @@ class DivergentUniverse:
                         log.info("中断事件处理，已检测到随意门并成功进入")
                         return
 
-                self.process_re_enter()
+                if self.stage_finish or self.process_re_enter():
+                    return
                 event_count += 1
                 timeout_retries = 0
             else:
@@ -704,7 +710,8 @@ class DivergentUniverse:
                     else:
                         break
 
-                self.process_re_enter()
+                if self.stage_finish or self.process_re_enter():
+                    return
 
         log.info("事件处理超过5轮，尝试离开关卡")
         self.process_leave()
@@ -738,7 +745,8 @@ class DivergentUniverse:
                         time.sleep(2)
                     else:
                         break
-                self.process_re_enter()
+                if self.stage_finish or self.process_re_enter():
+                    return
                 continue
 
             log.info("尝试进入战斗")
@@ -752,6 +760,9 @@ class DivergentUniverse:
                     time.sleep(2)
                 else:
                     break
+
+            if self.stage_finish:
+                return
 
             # 进入战斗失败，尝试重新进入
             if auto.find_element("./assets/images/screen/divergent_universe/stage.png", "image", 0.9, crop=(33 / 1920, 52 / 1080, 68 / 1920, 60 / 1080)):
@@ -767,8 +778,11 @@ class DivergentUniverse:
                         time.sleep(2)
                     else:
                         break
+                if self.stage_finish:
+                    return
                 if auto.find_element("./assets/images/screen/divergent_universe/stage.png", "image", 0.9, crop=(33 / 1920, 52 / 1080, 68 / 1920, 60 / 1080)):
-                    self.process_re_enter()
+                    if self.process_re_enter():
+                        return
                     continue
             else:
                 self.process_stage = True
@@ -802,7 +816,8 @@ class DivergentUniverse:
                     time.sleep(2)
                 else:
                     break
-            self.process_re_enter()
+            if self.stage_finish or self.process_re_enter():
+                return
             if self.process_random_door():
                 return
 
@@ -830,7 +845,8 @@ class DivergentUniverse:
                 time.sleep(2)
             else:
                 break
-        self.process_re_enter()
+        if self.stage_finish or self.process_re_enter():
+            return
         auto.press_key("w", 2)
         if self.process_random_door():
             return
@@ -850,7 +866,8 @@ class DivergentUniverse:
                 time.sleep(2)
             else:
                 break
-        self.process_re_enter()
+        if self.stage_finish or self.process_re_enter():
+            return
         auto.press_key("w", 2)
         if self.process_random_door(stable_mode=True):
             return
@@ -879,7 +896,33 @@ class DivergentUniverse:
         else:
             self.stage_finish = True
 
-    def process_re_enter(self):
+    def has_stage_changed(self) -> bool:
+        """只核对区域编号，交由主循环处理新区域，避免嵌套执行关卡。"""
+        previous = re.match(r"^(\d+)/(13|17|20)\|", self.current_stage)
+        if not previous:
+            return False
+        previous_progress = tuple(map(int, previous.groups()))
+        last_progress = None
+        for attempt in range(3):
+            stage_text = auto.get_single_line_text(crop=(57 / 1920, 15 / 1080, 260 / 1920, 27 / 1080))
+            match = re.search(r"[（(]\s*(\d+)\s*/\s*(13|17|20)\s*[)）]", stage_text or "")
+            progress = tuple(map(int, match.groups())) if match else None
+            if progress and 1 <= progress[0] <= progress[1]:
+                if progress == previous_progress:
+                    return False
+                # 连续两次读到同一新编号才退出旧流程，避免单帧 OCR 误识别。
+                if progress == last_progress:
+                    log.info(f"区域进度已变化：{previous_progress[0]}/{previous_progress[1]} → {progress[0]}/{progress[1]}，返回主循环处理")
+                    return True
+                last_progress = progress
+            else:
+                last_progress = None
+            if attempt < 2:
+                time.sleep(0.5)
+        return False
+
+    def process_re_enter(self) -> bool:
+        """重新进入关卡；区域编号已变化时返回 True，调用方应停止旧区域流程。"""
         log.info("尝试重新进入当前关卡")
         for _ in range(3):
             auto.press_key("esc")
@@ -892,10 +935,11 @@ class DivergentUniverse:
                 if auto.click_element("继续进度", "text", crop=(39 / 1920, 215 / 1080, 748 / 1920, 597 / 1080)):
                     if not self.wait_stage_after_continue():
                         raise RuntimeError("重新进入关卡失败")
-                    return
+                    return self.has_stage_changed()
                 else:
                     raise RuntimeError("未找到继续进度按钮")
         log.error("多次尝试重新进入关卡失败")
+        return False
 
     def wait_stage_after_continue(self, max_retries: int = 120) -> bool:
         """等待“继续进度”后进入关卡界面，顺带处理跨周确认框（#1175）。
@@ -939,6 +983,8 @@ class DivergentUniverse:
         return auto.find_element((LOWER, UPPER), "hsv", take_screenshot=False)
 
     def process_random_door(self, stable_mode=False, timeout=15):
+        if self.stage_finish:
+            return True
         if cfg.cloud_game_enable or cfg.weekly_divergent_stable_mode:
             stable_mode = True
         window = Screenshot.get_window(cfg.game_title_name)
@@ -1088,10 +1134,12 @@ class DivergentUniverse:
             elif auto.matched_text == "愿力满盈":
                 self.process_wish()
             elif auto.matched_text == "选择下一站":
+                self.stage_finish = True
                 self.process_next_station()
             elif auto.matched_text == "事件":
                 self.process_event()
             elif auto.matched_text == "选择站点卡":
+                self.stage_finish = True
                 self.process_station_card()
             elif auto.matched_text == "存档管理":
                 self.process_save_management()
@@ -1325,21 +1373,16 @@ class DivergentUniverse:
         if not auto.find_element("摧毁", "text", crop=button_crop, include=False):
             raise RuntimeError("奇物损毁按钮未识别，停止点击")
 
-        # 一张或三张卡片时选中间；两张时选左边。先识别卡名再点击，
-        # 不连续盲点多个位置，避免切换已选中的卡片。
-        name_crops = (
-            (777 / 1920, 482 / 1080, 370 / 1920, 70 / 1080),
-            (537 / 1920, 482 / 1080, 369 / 1920, 70 / 1080),
+        # 沿用选择/丢弃奇物的方式，先点双选项左侧，再点单/三选项中间。
+        # 不用卡名 OCR 判断布局，避免读到相邻卡名后只点击中间空白。
+        relic_positions = (
+            (517 / 1920, 242 / 1080, 409 / 1920, 610 / 1080),
+            (757 / 1920, 242 / 1080, 410 / 1920, 610 / 1080),
         )
-        for crop in name_crops:
-            name = auto.get_single_line_text(crop=crop, max_retries=2)
-            if name and name.strip():
-                if not auto.click_element(crop, "crop"):
-                    raise RuntimeError("奇物损毁卡片点击失败")
-                log.info(f"奇物损毁：选择{name.strip()}")
-                break
-        else:
-            raise RuntimeError("奇物损毁卡片未识别，停止点击")
+        log.info("奇物损毁：尝试选择奇物")
+        for pos in relic_positions:
+            if not auto.click_element(pos, "crop"):
+                raise RuntimeError("奇物损毁卡片点击失败")
 
         time.sleep(0.5)
         if not auto.click_element("摧毁", "text", max_retries=3, crop=button_crop, include=False):
@@ -1728,7 +1771,7 @@ class DivergentUniverse:
         """
         检查并开启自动战斗
         """
-        if cfg.auto_battle_detect_enable and auto.find_element("./assets/images/share/base/not_auto.png", "image", 0.9, crop=(0.0 / 1920, 903.0 / 1080, 144.0 / 1920, 120.0 / 1080)):
+        if game_option_enabled(cfg, "auto_battle_detect_enable") and auto.find_element("./assets/images/share/base/not_auto.png", "image", 0.9, crop=(0.0 / 1920, 903.0 / 1080, 144.0 / 1920, 120.0 / 1080)):
             log.info("尝试开启自动战斗")
             auto.press_key(cfg.get_value("hotkey_auto_battle", "v"))
             return True
